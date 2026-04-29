@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "my-wxauto"
+version = "0.1.0"
+description = "A small WeChat 4.x automation compatibility layer."
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "psutil>=5.9",
+    "pywinauto>=0.6.8; platform_system == 'Windows'",
+    "pywin32>=306; platform_system == 'Windows'",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+]
+
+[project.scripts]
+my-wxauto = "my_wxauto.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

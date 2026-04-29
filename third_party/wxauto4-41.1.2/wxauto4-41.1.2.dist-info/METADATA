@@ -1,0 +1,81 @@
+Metadata-Version: 2.4
+Name: wxauto4
+Version: 41.1.2
+Summary: wxauto for 4.0
+Author: Cluic
+Author-email: tikic@qq.com
+Requires-Python: >=3.9,<3.14
+Classifier: Programming Language :: Python :: 3
+Classifier: Programming Language :: Python :: 3.9
+Classifier: Programming Language :: Python :: 3.10
+Classifier: Programming Language :: Python :: 3.11
+Classifier: Programming Language :: Python :: 3.12
+Classifier: Programming Language :: Python :: 3.13
+Requires-Dist: colorama
+Requires-Dist: comtypes
+Requires-Dist: pillow
+Requires-Dist: psutil
+Requires-Dist: pyperclip
+Requires-Dist: pywin32
+Requires-Dist: tenacity
+Description-Content-Type: text/markdown
+
+# wxauto
+
+适用最新4.1.8
+
+## 获取实例
+
+```python
+from wxauto4 import WeChat
+
+wx = WeChat()
+```
+
+
+## 切换聊天对象
+
+```python
+from wxauto4 import WeChat
+
+wx = WeChat()
+wx.ChatWith('张三')
+```
+
+## 获取当前聊天窗口信息
+
+```
+from wxauto4 import WeChat
+
+wx = WeChat()
+wx.ChatInfo()
+```
+
+## 发送消息
+
+```python
+from wxauto4 import WeChat
+
+wx = WeChat()
+wx.SendMsg('你好')
+```
+
+## 发送文件、图片
+
+```python
+from wxauto4 import WeChat
+
+wx = WeChat()
+wx.SendFiles(r'D:\image.png')
+```
+
+## 获取当前聊天消息
+
+```python
+from wxauto4 import WeChat
+
+wx = WeChat()
+msgs = wx.GetAllMessage()
+for msg in msgs:
+    print(msg.raw)
+```
