@@ -27,3 +27,4 @@ dist/
 
 Thumbs.db
 .DS_Store
+*.txt

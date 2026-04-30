@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 
+from my_wxauto import probes
 from my_wxauto import cli
 from my_wxauto.response import WxResponse
 
@@ -21,6 +22,54 @@ class FakeWeChat:
     def SendMsg(self, msg: str, who: str) -> WxResponse:
         self.calls.append(("SendMsg", (msg, who)))
         return WxResponse.success("sent", {"who": who, "message": msg})
+
+
+def test_main_runs_wakeup_probe(monkeypatch, capsys) -> None:
+    calls: list[dict[str, object]] = []
+
+    def fake_watch_unread_wakeup(**kwargs: object) -> None:
+        calls.append(kwargs)
+        print("wakeup probe")
+
+    monkeypatch.setattr(probes, "watch_unread_wakeup", fake_watch_unread_wakeup)
+
+    exit_code = cli.main(
+        [
+            "--watch-wakeup",
+            "10",
+            "--probe-interval",
+            "0.2",
+            "--probe-max-controls",
+            "12",
+            "--wakeup-burst-changes",
+            "3",
+            "--wakeup-burst-window",
+            "2",
+            "--wakeup-cooldown",
+            "4",
+            "--wakeup-action-timeout",
+            "9",
+            "--wakeup-max-probes",
+            "2",
+            "--wakeup-open-unread",
+        ]
+    )
+
+    assert exit_code == 0
+    assert calls == [
+        {
+            "seconds": 10.0,
+            "interval": 0.2,
+            "max_controls": 12,
+            "min_changes": 3,
+            "window_seconds": 2.0,
+            "cooldown_seconds": 4.0,
+            "action_timeout": 9.0,
+            "max_probes": 2,
+            "open_unread_messages": True,
+        }
+    ]
+    assert capsys.readouterr().out == "wakeup probe\n"
 
 
 def test_main_opens_chat_without_message(monkeypatch, capsys) -> None:
@@ -47,3 +96,17 @@ def test_main_sends_message_when_message_argument_is_present(monkeypatch, capsys
     output = json.loads(capsys.readouterr().out)
     assert output["status"] == "success"
     assert output["data"]["message"] == "你好"
+
+
+def test_main_writes_utf8_output_file(monkeypatch, capsys, tmp_path) -> None:
+    FakeWeChat.instances.clear()
+    monkeypatch.setattr(cli, "WeChat", FakeWeChat)
+    output_path = tmp_path / "probe-output.txt"
+
+    exit_code = cli.main(["张三", "--output", str(output_path)])
+
+    assert exit_code == 0
+    assert capsys.readouterr().out == ""
+    output = json.loads(output_path.read_text(encoding="utf-8"))
+    assert output["status"] == "success"
+    assert output["data"]["who"] == "张三"
