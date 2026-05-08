@@ -5,6 +5,7 @@ import time
 from my_wxauto import listener
 from my_wxauto.listener import ChatMessage, get_latest_message, get_visible_messages, listen_new_messages
 from my_wxauto.wechat import WeChat
+from my_wxauto.window import WindowRect
 
 
 def test_listen_new_messages_calls_callback_with_latest_message(monkeypatch) -> None:
@@ -126,6 +127,20 @@ def test_events_from_probe_leaves_sender_empty_when_preview_does_not_match_lates
 
     assert events[0].latest_message is not None
     assert events[0].latest_message.sender is None
+
+
+def test_chat_message_carries_is_self_flag() -> None:
+    message = ChatMessage.from_probe(
+        {
+            "content": "hello",
+            "message_type": "text",
+            "is_self": True,
+            "rect": {"left": 1, "top": 2, "right": 3, "bottom": 4},
+        }
+    )
+
+    assert message.is_self is True
+    assert message.to_dict()["is_self"] is True
 
 
 def test_get_latest_message_returns_latest_visible_message_with_sender_from_preview(monkeypatch) -> None:
@@ -400,6 +415,36 @@ def test_avatar_click_points_target_avatar_columns_from_message_row() -> None:
 
     assert (358, 447) in points
     assert (846, 447) in points
+
+
+def test_infer_message_is_self_from_right_green_bubble_pixels() -> None:
+    region = WindowRect(left=100, top=200, right=500, bottom=320)
+    raw = bytearray([255, 255, 255, 255] * (region.width * region.height))
+    for y in range(30, 70):
+        for x in range(250, 360):
+            offset = (y * region.width + x) * 4
+            raw[offset : offset + 4] = bytes([105, 220, 150, 255])
+    message = {
+        "message_type": "text",
+        "visible_rect": {"left": 100, "top": 200, "right": 500, "bottom": 320},
+    }
+
+    assert listener._infer_message_is_self_from_pixels(message, region, bytes(raw)) is True
+
+
+def test_infer_message_is_not_self_without_right_green_bubble_pixels() -> None:
+    region = WindowRect(left=100, top=200, right=500, bottom=320)
+    raw = bytearray([255, 255, 255, 255] * (region.width * region.height))
+    for y in range(30, 70):
+        for x in range(20, 120):
+            offset = (y * region.width + x) * 4
+            raw[offset : offset + 4] = bytes([235, 235, 235, 255])
+    message = {
+        "message_type": "text",
+        "visible_rect": {"left": 100, "top": 200, "right": 500, "bottom": 320},
+    }
+
+    assert listener._infer_message_is_self_from_pixels(message, region, bytes(raw)) is False
 
 
 def test_profile_name_priority_prefers_display_name_and_rejects_labels() -> None:

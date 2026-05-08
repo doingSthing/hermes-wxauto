@@ -15,6 +15,7 @@ class ChatMessage:
     content: str
     message_type: str = "unknown"
     sender: str | None = None
+    is_self: bool | None = None
     time_text: str | None = None
     raw_name: str = ""
     class_name: str = ""
@@ -29,6 +30,7 @@ class ChatMessage:
             content=content,
             message_type=str(payload.get("message_type") or "unknown"),
             sender=_optional_str(payload.get("sender")),
+            is_self=_optional_bool(payload.get("is_self")),
             time_text=_optional_str(payload.get("time_text")),
             raw_name=str(payload.get("raw_name") or content),
             class_name=str(payload.get("class_name") or ""),
@@ -42,6 +44,7 @@ class ChatMessage:
             "content": self.content,
             "message_type": self.message_type,
             "sender": self.sender,
+            "is_self": self.is_self,
             "time_text": self.time_text,
             "raw_name": self.raw_name,
             "class_name": self.class_name,
@@ -264,6 +267,7 @@ def _collect_current_chat_payload(
         _message_with_visible_rect(message, message_region)
         for message in probes._parse_chat_message_items(message_controls)
     ]
+    messages = _annotate_messages_with_self_flags(messages, message_region)
     _reader_progress(
         progress,
         "collect_messages.after",
@@ -471,6 +475,80 @@ def _message_with_visible_rect(message: dict[str, Any], region: Any) -> dict[str
     return {**message, "visible_rect": visible_rect}
 
 
+def _annotate_messages_with_self_flags(messages: list[dict[str, Any]], region: Any) -> list[dict[str, Any]]:
+    try:
+        width = int(region.width)
+        height = int(region.height)
+        if width <= 0 or height <= 0:
+            return messages
+        screen_bgra = probes._capture_screen_bgra(region.left, region.top, width, height)
+    except Exception:
+        return messages
+
+    annotated: list[dict[str, Any]] = []
+    for message in messages:
+        if message.get("is_self") is not None:
+            annotated.append(message)
+            continue
+        is_self = _infer_message_is_self_from_pixels(message, region, screen_bgra)
+        annotated.append({**message, "is_self": is_self})
+    return annotated
+
+
+def _infer_message_is_self_from_pixels(message: dict[str, Any], region: Any, screen_bgra: bytes) -> bool | None:
+    if str(message.get("message_type") or "") != "text":
+        return None
+    rect = message.get("visible_rect") or message.get("rect")
+    if not isinstance(rect, dict):
+        return None
+    try:
+        left = max(int(rect["left"]), int(region.left)) - int(region.left)
+        top = max(int(rect["top"]), int(region.top)) - int(region.top)
+        right = min(int(rect["right"]), int(region.right)) - int(region.left)
+        bottom = min(int(rect["bottom"]), int(region.bottom)) - int(region.top)
+        width = int(region.width)
+    except (KeyError, TypeError, ValueError):
+        return None
+    if right <= left or bottom <= top or width <= 0:
+        return None
+
+    midpoint = left + (right - left) // 2
+    right_green = 0
+    left_green = 0
+    total = 0
+    for y in range(max(0, top), max(0, bottom), 2):
+        for x in range(max(0, left), max(0, right), 2):
+            offset = (y * width + x) * 4
+            if offset + 3 >= len(screen_bgra):
+                continue
+            blue = screen_bgra[offset]
+            green = screen_bgra[offset + 1]
+            red = screen_bgra[offset + 2]
+            total += 1
+            if _looks_like_self_bubble_pixel(red=red, green=green, blue=blue):
+                if x >= midpoint:
+                    right_green += 1
+                else:
+                    left_green += 1
+
+    if total <= 0:
+        return None
+    green_ratio = right_green / total
+    if right_green >= 80 and green_ratio >= 0.008 and right_green >= max(20, left_green * 2):
+        return True
+    return False
+
+
+def _looks_like_self_bubble_pixel(*, red: int, green: int, blue: int) -> bool:
+    return (
+        green >= 175
+        and 70 <= red <= 190
+        and blue <= 170
+        and green - red >= 30
+        and green - blue >= 40
+    )
+
+
 def _events_from_probe(payload: dict[str, Any], *, flash_index: int) -> list[NewMessageEvent]:
     unread_count = _safe_int(payload.get("unread_count"))
     events: list[NewMessageEvent] = []
@@ -497,6 +575,7 @@ def _events_from_probe(payload: dict[str, Any], *, flash_index: int) -> list[New
                     content=messages[-1].content,
                     message_type=messages[-1].message_type,
                     sender=inferred_latest_sender,
+                    is_self=messages[-1].is_self,
                     time_text=messages[-1].time_text,
                     raw_name=messages[-1].raw_name,
                     class_name=messages[-1].class_name,
@@ -917,6 +996,7 @@ def _copy_message(message: ChatMessage, *, sender: str | None = None) -> ChatMes
         content=message.content,
         message_type=message.message_type,
         sender=sender if sender is not None else message.sender,
+        is_self=message.is_self,
         time_text=message.time_text,
         raw_name=message.raw_name,
         class_name=message.class_name,
@@ -931,3 +1011,17 @@ def _optional_str(value: object) -> str | None:
         return None
     text = str(value)
     return text if text else None
+
+
+def _optional_bool(value: object) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return None
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"true", "1", "yes"}:
+            return True
+        if lowered in {"false", "0", "no"}:
+            return False
+    return None
