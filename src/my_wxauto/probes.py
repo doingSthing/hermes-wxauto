@@ -509,17 +509,22 @@ def _chat_message_region(window: WeChatWindow) -> WindowRect:
 
 def _parse_chat_message_items(controls: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
     messages: list[dict[str, Any]] = []
+    current_time_text: str | None = None
     for control in controls:
         control_type = str(control.get("control_type") or "")
         class_name = str(control.get("class_name") or "")
         automation_id = str(control.get("automation_id") or "")
         if control_type != "ListItem":
             continue
-        if "ChatItemView" in class_name and "ChatTextItemView" not in class_name:
-            continue
-        if "Chat" not in class_name and "chat_message_list" not in automation_id:
+        if "ChatSessionCell" in class_name:
             continue
         raw_name = str(control.get("name") or "").strip()
+        if "ChatItemView" in class_name and "ChatTextItemView" not in class_name:
+            if raw_name:
+                current_time_text = raw_name
+            continue
+        if "chat_message_list" not in automation_id and "ChatTextItemView" not in class_name:
+            continue
         if not raw_name:
             continue
         message_type = "text" if "ChatTextItemView" in class_name else "unknown"
@@ -527,6 +532,8 @@ def _parse_chat_message_items(controls: Iterable[dict[str, Any]]) -> list[dict[s
             {
                 "content": raw_name,
                 "message_type": message_type,
+                "sender": None,
+                "time_text": current_time_text,
                 "raw_name": raw_name,
                 "class_name": class_name,
                 "automation_id": automation_id,

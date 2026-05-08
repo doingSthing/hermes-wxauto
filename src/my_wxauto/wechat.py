@@ -159,6 +159,29 @@ class WeChat:
     def send_message(self, who: str, message: str, **kwargs: object) -> WxResponse:
         return self.SendMsg(message, who, **kwargs)
 
+    def listen_new_messages(self, callback, **kwargs: object):
+        from . import listener
+
+        return listener.listen_new_messages(callback, **kwargs)
+
+    def get_latest_message(self, who: str, **kwargs: object):
+        from . import listener
+
+        open_first = bool(kwargs.pop("open_first", True))
+        return listener.get_latest_message(who, open_chat=self.ChatWith if open_first else None, **kwargs)
+
+    def GetLatestMessage(self, who: str, **kwargs: object):
+        return self.get_latest_message(who, **kwargs)
+
+    def get_visible_messages(self, who: str, **kwargs: object):
+        from . import listener
+
+        open_first = bool(kwargs.pop("open_first", True))
+        return listener.get_visible_messages(who, open_chat=self.ChatWith if open_first else None, **kwargs)
+
+    def GetVisibleMessages(self, who: str, **kwargs: object):
+        return self.get_visible_messages(who, **kwargs)
+
     def _open_chat_window(
         self,
         target: str,

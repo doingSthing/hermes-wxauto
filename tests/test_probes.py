@@ -358,12 +358,70 @@ def test_parse_chat_message_items_skips_time_rows_and_empty_items() -> None:
         {
             "content": "hello",
             "message_type": "text",
+            "sender": None,
+            "time_text": "09:25",
             "raw_name": "hello",
             "class_name": "mmui::ChatTextItemView",
             "automation_id": "chat_message_list.qt_scrollarea_viewport.chat_bubble_item_view",
             "rect": {"left": 10, "top": 20, "right": 30, "bottom": 40},
         }
     ]
+
+
+def test_parse_chat_message_items_skips_left_session_cells() -> None:
+    controls = [
+        {
+            "name": "张勋\npreview\n10:02",
+            "control_type": "ListItem",
+            "class_name": "mmui::ChatSessionCell",
+            "automation_id": "session_item_张勋",
+            "rect": {"left": 301, "top": 286, "right": 541, "bottom": 350},
+        },
+        {
+            "name": "actual message",
+            "control_type": "ListItem",
+            "class_name": "mmui::ChatTextItemView",
+            "automation_id": "chat_message_list.qt_scrollarea_viewport.chat_bubble_item_view",
+            "rect": {"left": 542, "top": 591, "right": 1118, "bottom": 647},
+        },
+    ]
+
+    messages = _parse_chat_message_items(controls)
+
+    assert [message["content"] for message in messages] == ["actual message"]
+
+
+def test_parse_chat_message_items_assigns_visible_time_to_following_messages() -> None:
+    controls = [
+        {
+            "name": "before time",
+            "control_type": "ListItem",
+            "class_name": "mmui::ChatTextItemView",
+            "automation_id": "chat_message_list.qt_scrollarea_viewport.chat_bubble_item_view",
+            "rect": {"left": 10, "top": 20, "right": 30, "bottom": 40},
+        },
+        {
+            "name": "15:40",
+            "control_type": "ListItem",
+            "class_name": "mmui::ChatItemView",
+            "automation_id": "",
+            "rect": {"left": 10, "top": 41, "right": 30, "bottom": 60},
+        },
+        {
+            "name": "after time",
+            "control_type": "ListItem",
+            "class_name": "mmui::ChatTextItemView",
+            "automation_id": "chat_message_list.qt_scrollarea_viewport.chat_bubble_item_view",
+            "rect": {"left": 10, "top": 61, "right": 30, "bottom": 80},
+        },
+    ]
+
+    messages = _parse_chat_message_items(controls)
+
+    assert messages[0]["content"] == "before time"
+    assert messages[0]["time_text"] is None
+    assert messages[1]["content"] == "after time"
+    assert messages[1]["time_text"] == "15:40"
 
 
 def test_probe_sessions_after_wakeup_can_open_unread_session_and_collect_messages(monkeypatch) -> None:
