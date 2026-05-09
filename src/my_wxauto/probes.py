@@ -747,53 +747,65 @@ def _probe_sessions_after_wakeup_with_timeout(
     deadline = time.monotonic() + timeout
     result: dict[str, Any] | None = None
     last_progress: dict[str, Any] | None = None
-    while time.monotonic() < deadline:
-        try:
-            message = result_queue.get_nowait()
-        except queue.Empty:
-            if not process.is_alive():
-                break
-            time.sleep(0.05)
-            continue
-        if message.get("status") == "progress":
-            last_progress = message
-            if message.get("stage") == "open_unread.chat" and on_chat_opened is not None:
-                chat = message.get("chat")
-                if isinstance(chat, dict):
-                    on_chat_opened(chat)
-            if on_progress is not None:
-                on_progress({key: value for key, value in message.items() if key != "status"})
-            continue
-        result = message
-        break
+    completed = False
+    try:
+        while time.monotonic() < deadline:
+            try:
+                message = result_queue.get_nowait()
+            except queue.Empty:
+                if not process.is_alive():
+                    break
+                time.sleep(0.05)
+                continue
+            if message.get("status") == "progress":
+                last_progress = message
+                if message.get("stage") == "open_unread.chat" and on_chat_opened is not None:
+                    chat = message.get("chat")
+                    if isinstance(chat, dict):
+                        on_chat_opened(chat)
+                if on_progress is not None:
+                    on_progress({key: value for key, value in message.items() if key != "status"})
+                continue
+            result = message
+            break
 
-    if result is None and process.is_alive():
-        process.terminate()
-        process.join(1.0)
-        if process.is_alive():
-            process.kill()
+        if result is None and process.is_alive():
+            process.terminate()
             process.join(1.0)
-        return {
-            "status": "timeout",
-            "timeout": timeout,
-            "last_progress": {key: value for key, value in (last_progress or {}).items() if key != "status"},
-            "duration_ms": round((time.perf_counter() - started) * 1000, 1),
-        }
+            if process.is_alive():
+                process.kill()
+                process.join(1.0)
+            completed = True
+            return {
+                "status": "timeout",
+                "timeout": timeout,
+                "last_progress": {key: value for key, value in (last_progress or {}).items() if key != "status"},
+                "duration_ms": round((time.perf_counter() - started) * 1000, 1),
+            }
 
-    process.join(1.0)
-    if result is None:
-        try:
-            result = result_queue.get_nowait()
-        except queue.Empty:
-            result = None
-    if result is None:
-        return {
-            "status": "error",
-            "error": f"probe child exited without result, exitcode={process.exitcode}",
-            "duration_ms": round((time.perf_counter() - started) * 1000, 1),
-        }
-    result["duration_ms"] = result.get("duration_ms", round((time.perf_counter() - started) * 1000, 1))
-    return result
+        process.join(1.0)
+        if result is None:
+            try:
+                result = result_queue.get_nowait()
+            except queue.Empty:
+                result = None
+        if result is None:
+            completed = True
+            return {
+                "status": "error",
+                "error": f"probe child exited without result, exitcode={process.exitcode}",
+                "duration_ms": round((time.perf_counter() - started) * 1000, 1),
+            }
+        result["duration_ms"] = result.get("duration_ms", round((time.perf_counter() - started) * 1000, 1))
+        completed = True
+        return result
+    finally:
+        if not completed and process.is_alive():
+            process.terminate()
+            process.join(1.0)
+            if process.is_alive():
+                process.kill()
+                process.join(1.0)
 
 
 def _probe_sessions_after_wakeup_worker(

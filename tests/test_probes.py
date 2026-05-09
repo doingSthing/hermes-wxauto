@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from my_wxauto.probes import (
     TaskbarFlashDetector,
     _find_red_components,
@@ -746,6 +748,66 @@ def test_probe_sessions_after_wakeup_with_timeout_dispatches_parent_chat_callbac
     assert len(args) == 6
     assert args[1:] == (12, [{"source": "taskbar"}], True, 3, 9.5)
     assert callback not in args
+
+
+def test_probe_sessions_after_wakeup_with_timeout_cleans_worker_when_parent_callback_fails(monkeypatch) -> None:
+    messages = [
+        {"status": "progress", "stage": "open_unread.chat", "chat": {"chat_name": "a"}},
+    ]
+    captured: dict[str, object] = {}
+
+    class FakeQueue:
+        def __init__(self, maxsize: int) -> None:
+            captured["queue_maxsize"] = maxsize
+
+        def get_nowait(self) -> dict[str, object]:
+            if not messages:
+                raise probes.queue.Empty
+            return messages.pop(0)
+
+    class FakeProcess:
+        daemon = False
+        exitcode = None
+
+        def __init__(self, *, target, args) -> None:
+            captured["target"] = target
+            captured["args"] = args
+            self.alive = True
+
+        def start(self) -> None:
+            captured["started"] = True
+
+        def is_alive(self) -> bool:
+            return self.alive
+
+        def terminate(self) -> None:
+            captured["terminated"] = True
+            self.alive = False
+
+        def join(self, timeout: float | None = None) -> None:
+            captured.setdefault("join_timeouts", []).append(timeout)
+
+    class FakeContext:
+        def Queue(self, maxsize: int) -> FakeQueue:
+            return FakeQueue(maxsize)
+
+        def Process(self, *, target, args) -> FakeProcess:
+            return FakeProcess(target=target, args=args)
+
+    def callback(_chat: dict[str, object]) -> None:
+        raise RuntimeError("callback failed")
+
+    monkeypatch.setattr(probes.mp, "get_context", lambda method: FakeContext())
+
+    with pytest.raises(RuntimeError, match="callback failed"):
+        probes._probe_sessions_after_wakeup_with_timeout(
+            max_controls=12,
+            timeout=5.0,
+            on_chat_opened=callback,
+        )
+
+    assert captured["terminated"] is True
+    assert captured["join_timeouts"] == [1.0]
 
 
 def test_find_red_components_returns_badge_candidates() -> None:
