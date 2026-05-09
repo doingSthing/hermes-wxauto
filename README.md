@@ -10,6 +10,30 @@ wx.ChatWith("张三")
 wx.SendMsg("你好", "张三")
 ```
 
+## Conversation batch listener
+
+`my-wxauto` also exposes a reliability-oriented listener for robot integrations.
+It reads unread WeChat conversations in bounded drain cycles, deduplicates
+messages, batches messages per conversation, and emits one conversation batch
+at a time.
+
+```python
+from my_wxauto import WeChat
+
+wx = WeChat()
+
+def on_batch(batch):
+    print(batch.to_event_dict())
+
+wx.listen_conversation_batches(
+    on_batch,
+    max_chats_per_drain=5,
+)
+```
+
+The listener does not send multiple unrelated conversations as one model
+request. Each emitted batch belongs to one WeChat conversation.
+
 ## 免责声明
 
 本工具仅供学习研究使用。使用者应遵守微信用户协议及相关法律法规，并自行承担使用本工具产生的风险与责任。
