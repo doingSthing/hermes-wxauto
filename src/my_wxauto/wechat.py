@@ -164,6 +164,11 @@ class WeChat:
 
         return listener.listen_new_messages(callback, **kwargs)
 
+    def listen_conversation_batches(self, callback, **kwargs: object):
+        from . import listener
+
+        return listener.listen_conversation_batches(callback, **kwargs)
+
     def get_latest_message(self, who: str, **kwargs: object):
         from . import listener
 

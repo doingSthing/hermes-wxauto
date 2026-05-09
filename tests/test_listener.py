@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import time
 
+import my_wxauto
 from my_wxauto import listener
+from my_wxauto.bridge_events import BridgeMessage, ConversationBatch
 from my_wxauto.listener import ChatMessage, get_latest_message, get_visible_messages, listen_new_messages
 from my_wxauto.wechat import WeChat
 from my_wxauto.window import WindowRect
@@ -521,6 +523,32 @@ def test_wechat_listen_new_messages_delegates_to_listener(monkeypatch) -> None:
 
     assert result == "stats"
     assert calls == [{"callback": callback, "seconds": 3, "max_events": 1}]
+
+
+def test_wechat_listen_conversation_batches_delegates_to_listener(monkeypatch) -> None:
+    calls: list[dict[str, object]] = []
+
+    def callback(batch: object) -> None:
+        calls.append({"callback_batch": batch})
+
+    def fake_listen_conversation_batches(callback_arg, **kwargs: object) -> str:
+        calls.append({"callback": callback_arg, **kwargs})
+        return "batch-stats"
+
+    monkeypatch.setattr(listener, "listen_conversation_batches", fake_listen_conversation_batches)
+
+    wx = WeChat(prefer_wxauto4=False)
+    result = wx.listen_conversation_batches(callback, seconds=3, max_events=1)
+
+    assert result == "batch-stats"
+    assert calls == [{"callback": callback, "seconds": 3, "max_events": 1}]
+
+
+def test_bridge_public_exports() -> None:
+    assert my_wxauto.BridgeMessage is BridgeMessage
+    assert my_wxauto.ConversationBatch is ConversationBatch
+    assert "BridgeMessage" in my_wxauto.__all__
+    assert "ConversationBatch" in my_wxauto.__all__
 
 
 def test_wechat_message_reader_methods_delegate_to_listener(monkeypatch) -> None:
