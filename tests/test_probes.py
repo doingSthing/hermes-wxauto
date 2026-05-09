@@ -561,6 +561,101 @@ def test_probe_sessions_after_wakeup_collects_top_session_when_unread_marker_is_
     assert result["opened_unread_chats"][0]["messages"][0]["content"] == "wake message"
 
 
+def test_open_unread_sessions_respects_max_unread_chats_and_reports_each_chat(monkeypatch) -> None:
+    window = WeChatWindow(
+        hwnd=100,
+        title="WeChat",
+        class_name="Qt51514QWindowIcon",
+        pid=42,
+        process_name="Weixin.exe",
+        exe=r"C:\Program Files\Tencent\Weixin\Weixin.exe",
+        rect=WindowRect(100, 200, 1000, 900),
+        visible=True,
+        minimized=False,
+    )
+    sessions = [
+        {"chat_name": "a", "rect": {"left": 300, "top": 280, "right": 540, "bottom": 340}},
+        {"chat_name": "b", "rect": {"left": 300, "top": 340, "right": 540, "bottom": 400}},
+        {"chat_name": "c", "rect": {"left": 300, "top": 400, "right": 540, "bottom": 460}},
+    ]
+    clicked: list[tuple[int, int]] = []
+    reported: list[str] = []
+
+    def fake_collect(window_arg, *, region, max_controls):
+        chat_name = sessions[len(clicked) - 1]["chat_name"]
+        return [
+            {
+                "name": f"message from {chat_name}",
+                "control_type": "ListItem",
+                "class_name": "mmui::ChatTextItemView",
+                "automation_id": "chat_message_list.qt_scrollarea_viewport.chat_bubble_item_view",
+                "rect": {"left": 542, "top": 591, "right": 1118, "bottom": 647},
+            }
+        ]
+
+    monkeypatch.setattr(probes, "_click_point", lambda point: clicked.append(point))
+    monkeypatch.setattr(probes, "_collect_uia_controls", fake_collect)
+    monkeypatch.setattr(probes.time, "sleep", lambda _seconds: None)
+
+    opened = probes._open_unread_sessions_and_collect_messages(
+        window,
+        sessions,
+        max_controls=12,
+        max_unread_chats=2,
+        on_chat_opened=lambda chat: reported.append(chat["chat_name"]),
+    )
+
+    assert [chat["chat_name"] for chat in opened] == ["a", "b"]
+    assert reported == ["a", "b"]
+    assert len(clicked) == 2
+
+
+def test_open_unread_sessions_stops_at_ui_busy_budget(monkeypatch) -> None:
+    window = WeChatWindow(
+        hwnd=100,
+        title="WeChat",
+        class_name="Qt51514QWindowIcon",
+        pid=42,
+        process_name="Weixin.exe",
+        exe=r"C:\Program Files\Tencent\Weixin\Weixin.exe",
+        rect=WindowRect(100, 200, 1000, 900),
+        visible=True,
+        minimized=False,
+    )
+    sessions = [
+        {"chat_name": "a", "rect": {"left": 300, "top": 280, "right": 540, "bottom": 340}},
+        {"chat_name": "b", "rect": {"left": 300, "top": 340, "right": 540, "bottom": 400}},
+    ]
+    times = iter([100.0, 100.0, 116.0, 116.0])
+
+    monkeypatch.setattr(probes.time, "perf_counter", lambda: next(times, 116.0))
+    monkeypatch.setattr(probes.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(probes, "_click_point", lambda _point: None)
+    monkeypatch.setattr(
+        probes,
+        "_collect_uia_controls",
+        lambda *_args, **_kwargs: [
+            {
+                "name": "hello",
+                "control_type": "ListItem",
+                "class_name": "mmui::ChatTextItemView",
+                "automation_id": "chat_message_list.qt_scrollarea_viewport.chat_bubble_item_view",
+                "rect": {"left": 542, "top": 591, "right": 1118, "bottom": 647},
+            }
+        ],
+    )
+
+    opened = probes._open_unread_sessions_and_collect_messages(
+        window,
+        sessions,
+        max_controls=12,
+        max_unread_chats=5,
+        max_ui_busy_seconds=15.0,
+    )
+
+    assert [chat["chat_name"] for chat in opened] == ["a"]
+
+
 def test_find_red_components_returns_badge_candidates() -> None:
     width = 20
     height = 16

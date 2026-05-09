@@ -299,6 +299,9 @@ def _probe_sessions_after_wakeup(
     max_controls: int,
     restore_icons: list[dict[str, Any]] | None = None,
     open_unread_messages: bool = False,
+    max_unread_chats: int = 1,
+    max_ui_busy_seconds: float = 15.0,
+    on_chat_opened: Callable[[dict[str, Any]], None] | None = None,
     report_progress: Callable[[str, dict[str, Any] | None], None] | None = None,
 ) -> dict[str, Any]:
     def progress(stage: str, extra: dict[str, Any] | None = None) -> None:
@@ -356,6 +359,9 @@ def _probe_sessions_after_wakeup(
             ready,
             message_targets,
             max_controls=max_controls,
+            max_unread_chats=max_unread_chats,
+            max_ui_busy_seconds=max_ui_busy_seconds,
+            on_chat_opened=on_chat_opened,
             report_progress=progress,
         )
     return {
@@ -400,10 +406,27 @@ def _open_unread_sessions_and_collect_messages(
     unread_sessions: list[dict[str, Any]],
     *,
     max_controls: int,
+    max_unread_chats: int = 1,
+    max_ui_busy_seconds: float = 15.0,
+    on_chat_opened: Callable[[dict[str, Any]], None] | None = None,
     report_progress: Callable[[str, dict[str, Any] | None], None] | None = None,
 ) -> list[dict[str, Any]]:
     opened: list[dict[str, Any]] = []
-    for index, session in enumerate(unread_sessions[:1]):
+    started_at = time.perf_counter()
+    limit = max(1, int(max_unread_chats))
+    for index, session in enumerate(unread_sessions[:limit]):
+        if opened and time.perf_counter() - started_at >= max_ui_busy_seconds:
+            if report_progress is not None:
+                report_progress(
+                    "open_unread.stop_ui_budget",
+                    {
+                        "index": index,
+                        "opened_count": len(opened),
+                        "elapsed_seconds": round(time.perf_counter() - started_at, 3),
+                        "max_ui_busy_seconds": max_ui_busy_seconds,
+                    },
+                )
+            break
         chat_name = str(session.get("chat_name") or "")
         source = str(session.get("_wakeup_source") or "unread_session")
         click_point = _session_click_point(session)
@@ -418,7 +441,12 @@ def _open_unread_sessions_and_collect_messages(
                 },
             )
         if click_point is None:
-            opened.append({"chat_name": chat_name, "source": source, "status": "no_click_point", "messages": []})
+            opened_chat = {"chat_name": chat_name, "source": source, "status": "no_click_point", "messages": []}
+            opened.append(opened_chat)
+            if report_progress is not None:
+                report_progress("open_unread.chat", {"chat": opened_chat})
+            if on_chat_opened is not None:
+                on_chat_opened(opened_chat)
             continue
         _click_point(click_point)
         time.sleep(0.5)
@@ -452,21 +480,24 @@ def _open_unread_sessions_and_collect_messages(
                     "message_count": len(messages),
                 },
             )
-        opened.append(
-            {
-                "chat_name": chat_name,
-                "source": source,
-                "status": "ok",
-                "click_point": list(click_point),
-                "message_region": _rect_to_dict(region),
-                "uia": {
-                    "duration_ms": round((time.perf_counter() - started) * 1000, 1),
-                    "count": len(controls),
-                    "controls": controls,
-                },
-                "messages": messages,
-            }
-        )
+        opened_chat = {
+            "chat_name": chat_name,
+            "source": source,
+            "status": "ok",
+            "click_point": list(click_point),
+            "message_region": _rect_to_dict(region),
+            "uia": {
+                "duration_ms": round((time.perf_counter() - started) * 1000, 1),
+                "count": len(controls),
+                "controls": controls,
+            },
+            "messages": messages,
+        }
+        opened.append(opened_chat)
+        if report_progress is not None:
+            report_progress("open_unread.chat", {"chat": opened_chat})
+        if on_chat_opened is not None:
+            on_chat_opened(opened_chat)
     return opened
 
 
@@ -692,6 +723,9 @@ def _probe_sessions_after_wakeup_with_timeout(
     timeout: float,
     restore_icons: list[dict[str, Any]] | None = None,
     open_unread_messages: bool = False,
+    max_unread_chats: int = 1,
+    max_ui_busy_seconds: float = 15.0,
+    on_chat_opened: Callable[[dict[str, Any]], None] | None = None,
     on_progress: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     started = time.perf_counter()
@@ -699,7 +733,14 @@ def _probe_sessions_after_wakeup_with_timeout(
     result_queue: mp.Queue[dict[str, Any]] = context.Queue(maxsize=1)
     process = context.Process(
         target=_probe_sessions_after_wakeup_worker,
-        args=(result_queue, max_controls, restore_icons, open_unread_messages),
+        args=(
+            result_queue,
+            max_controls,
+            restore_icons,
+            open_unread_messages,
+            max_unread_chats,
+            max_ui_busy_seconds,
+        ),
     )
     process.daemon = True
     process.start()
@@ -716,6 +757,10 @@ def _probe_sessions_after_wakeup_with_timeout(
             continue
         if message.get("status") == "progress":
             last_progress = message
+            if message.get("stage") == "open_unread.chat" and on_chat_opened is not None:
+                chat = message.get("chat")
+                if isinstance(chat, dict):
+                    on_chat_opened(chat)
             if on_progress is not None:
                 on_progress({key: value for key, value in message.items() if key != "status"})
             continue
@@ -756,6 +801,8 @@ def _probe_sessions_after_wakeup_worker(
     max_controls: int,
     restore_icons: list[dict[str, Any]] | None,
     open_unread_messages: bool,
+    max_unread_chats: int,
+    max_ui_busy_seconds: float,
 ) -> None:
     def report_progress(stage: str, extra: dict[str, Any] | None = None) -> None:
         result_queue.put({"status": "progress", "stage": stage, **(extra or {})})
@@ -769,6 +816,8 @@ def _probe_sessions_after_wakeup_worker(
                     max_controls=max_controls,
                     restore_icons=restore_icons,
                     open_unread_messages=open_unread_messages,
+                    max_unread_chats=max_unread_chats,
+                    max_ui_busy_seconds=max_ui_busy_seconds,
                     report_progress=report_progress,
                 ),
             }
