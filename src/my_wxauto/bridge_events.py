@@ -79,7 +79,7 @@ class ConversationBatch:
             "submitted_at": self.submitted_at,
             "completed_at": self.completed_at,
             "message_count": self.message_count,
-            "messages": [message.with_key().to_dict() for message in self.messages],
+            "messages": [message.to_dict() for message in self.messages],
         }
 
 
@@ -103,8 +103,11 @@ def messages_from_chat_payload(chat: dict[str, Any]) -> tuple[BridgeMessage, ...
     for index, payload in enumerate(chat.get("messages") or []):
         if not isinstance(payload, dict):
             continue
-        content = str(payload.get("content") or payload.get("raw_name") or "")
-        if not content:
+        content_value = payload.get("content")
+        if not _optional_str(content_value):
+            content_value = payload.get("raw_name")
+        content = str(content_value or "")
+        if not content.strip():
             continue
         message = BridgeMessage(
             chat_name=chat_name,

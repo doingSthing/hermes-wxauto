@@ -55,6 +55,31 @@ def test_messages_from_chat_payload_adds_keys_and_occurrence_indexes() -> None:
     assert messages[0].to_dict()["chat_name"] == "alice"
 
 
+def test_messages_from_chat_payload_skips_invalid_entries_and_preserves_raw() -> None:
+    raw_payload = {"raw_name": "fallback", "message_type": "image", "sender": "alice"}
+    messages = messages_from_chat_payload(
+        {
+            "chat_name": "alice",
+            "messages": [
+                "not a dict",
+                {"content": ""},
+                {"content": "   "},
+                raw_payload,
+                {"content": " \t ", "raw_name": "blank-content-fallback"},
+                {"content": " keep spaces ", "message_type": "text"},
+            ],
+        }
+    )
+
+    assert [message.content for message in messages] == [
+        "fallback",
+        "blank-content-fallback",
+        " keep spaces ",
+    ]
+    assert messages[0].raw is raw_payload
+    assert messages[0].to_dict()["raw"] == raw_payload
+
+
 def test_conversation_batch_to_event_dict() -> None:
     message = BridgeMessage(
         chat_name="alice",
