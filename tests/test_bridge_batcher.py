@@ -243,3 +243,25 @@ def test_batcher_recovers_unseen_open_batch_without_duplicating_after_restart(tm
     assert recovered.messages[0].content == "hello"
     assert recovered.messages[0].raw == {}
     assert store.is_seen(message.message_key)
+
+
+def test_batcher_marks_recovered_messages_seen_before_freeze_after_restart(tmp_path) -> None:
+    store = BridgeStore(tmp_path / "bridge.sqlite3")
+    message = _message("alice", "hello")
+    open_batch = ConversationBatch(
+        batch_id="batch-open",
+        chat_name="alice",
+        messages=(message,),
+        created_at=10.0,
+        status="open",
+    )
+    store.save_batch(open_batch)
+    assert not store.is_seen(message.message_key)
+
+    restarted = ConversationBatcher(store)
+    frozen = restarted.freeze_due_batches(now=18.0)
+    accepted = restarted.add_messages("alice", (message,), now=19.0)
+
+    assert len(frozen) == 1
+    assert accepted == 0
+    assert store.is_seen(message.message_key)

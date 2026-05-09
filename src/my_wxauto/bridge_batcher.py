@@ -133,6 +133,9 @@ class ConversationBatcher:
             chat_name = str(payload.get("chat_name") or row["chat_name"])
             created_at = float(payload.get("created_at") or row["created_at"])
             messages = tuple(self._message_from_payload(message) for message in payload.get("messages", ()))
+            for message in messages:
+                if not self.store.is_seen(message.message_key):
+                    self.store.record_seen_message(message, now=created_at)
             # Recovered batches conservatively use created_at for last_message_at because only
             # the stable event payload is persisted.
             open_batches[chat_name] = _OpenBatch(
