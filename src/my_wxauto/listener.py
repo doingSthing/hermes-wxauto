@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import time
-from queue import Empty, Queue
 from dataclasses import dataclass
+from pathlib import Path
+from queue import Empty, Queue
 from threading import Thread
 from typing import Any, Callable
 
 from . import probes
+from .bridge_batcher import BatchingConfig, ConversationBatcher
+from .bridge_events import ConversationBatch, messages_from_chat_payload
+from .bridge_store import BridgeStore
 from .window import WeChatWindowController
 
 
@@ -142,6 +146,89 @@ def listen_new_messages(
                 break
         time.sleep(interval)
 
+    return _stats(started, flash_count, event_count, stopped_reason)
+
+
+def listen_conversation_batches(
+    callback: Callable[[ConversationBatch], None],
+    *,
+    seconds: float = 0.0,
+    interval: float = 0.25,
+    max_controls: int = 260,
+    min_changes: int = 4,
+    window_seconds: float = 3.0,
+    cooldown_seconds: float = 5.0,
+    action_timeout: float = 15.0,
+    max_events: int = 0,
+    max_probes: int = 0,
+    max_chats_per_drain: int = 5,
+    max_ui_busy_seconds: float = 15.0,
+    store_path: str | Path = ".my_wxauto_bridge.sqlite3",
+    batching_config: BatchingConfig | None = None,
+) -> ListenerStats:
+    """Listen for unread chats and emit frozen conversation batches."""
+
+    probes._ensure_windows()
+    detector = probes.TaskbarFlashDetector(
+        min_changes=min_changes,
+        window_seconds=window_seconds,
+        cooldown_seconds=cooldown_seconds,
+    )
+    batcher = ConversationBatcher(BridgeStore(store_path), config=batching_config)
+    started = time.perf_counter()
+    deadline = None if seconds <= 0 else time.monotonic() + seconds
+    flash_count = 0
+    event_count = 0
+    stopped_reason = "timeout" if deadline is not None else "stopped"
+    stop_requested = False
+
+    def emit_due(now: float) -> None:
+        nonlocal event_count, stopped_reason, stop_requested
+        if stop_requested:
+            return
+        for batch in batcher.freeze_due_batches(now=now):
+            callback(batch)
+            event_count += 1
+            if max_events > 0 and event_count >= max_events:
+                stopped_reason = "max_events"
+                stop_requested = True
+                return
+
+    def on_chat_opened(chat: dict[str, Any]) -> None:
+        if stop_requested:
+            return
+        chat_name = str(chat.get("chat_name") or "")
+        if not chat_name or not chat.get("messages"):
+            return
+        now = time.monotonic()
+        messages = messages_from_chat_payload(chat)
+        if not messages:
+            return
+        batcher.add_messages(chat_name, messages, now=now)
+        emit_due(now)
+
+    while deadline is None or time.monotonic() < deadline:
+        icons = probes.inspect_wechat_taskbar_icons()
+        flash = detector.observe(time.monotonic(), probes._taskbar_signature(icons))
+        if flash is not None:
+            flash_count += 1
+            probes._probe_sessions_after_wakeup_with_timeout(
+                max_controls=max_controls,
+                timeout=action_timeout,
+                restore_icons=icons,
+                open_unread_messages=True,
+                max_unread_chats=max_chats_per_drain,
+                max_ui_busy_seconds=max_ui_busy_seconds,
+                on_chat_opened=on_chat_opened,
+            )
+            if stop_requested:
+                return _stats(started, flash_count, event_count, stopped_reason)
+            if max_probes > 0 and flash_count >= max_probes:
+                stopped_reason = "max_probes"
+                break
+        time.sleep(interval)
+
+    emit_due(time.monotonic())
     return _stats(started, flash_count, event_count, stopped_reason)
 
 
