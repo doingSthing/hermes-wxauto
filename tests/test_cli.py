@@ -1,10 +1,36 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import sys
+from pathlib import Path
 
 from my_wxauto import probes
 from my_wxauto import cli
 from my_wxauto.response import WxResponse
+
+
+def test_root_compat_package_exports_bridge_types_without_pythonpath() -> None:
+    env = os.environ.copy()
+    env.pop("PYTHONPATH", None)
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "from my_wxauto import BridgeMessage, ConversationBatch; "
+            "print(BridgeMessage.__name__, ConversationBatch.__name__)",
+        ],
+        cwd=Path(__file__).resolve().parents[1],
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "BridgeMessage ConversationBatch\n"
 
 
 class FakeWeChat:
