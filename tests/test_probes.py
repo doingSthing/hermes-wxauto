@@ -656,6 +656,98 @@ def test_open_unread_sessions_stops_at_ui_busy_budget(monkeypatch) -> None:
     assert [chat["chat_name"] for chat in opened] == ["a"]
 
 
+def test_open_unread_sessions_reports_no_click_point_chat(monkeypatch) -> None:
+    window = WeChatWindow(
+        hwnd=100,
+        title="WeChat",
+        class_name="Qt51514QWindowIcon",
+        pid=42,
+        process_name="Weixin.exe",
+        exe=r"C:\Program Files\Tencent\Weixin\Weixin.exe",
+        rect=WindowRect(100, 200, 1000, 900),
+        visible=True,
+        minimized=False,
+    )
+    reported: list[dict[str, object]] = []
+    progress: list[tuple[str, dict[str, object] | None]] = []
+
+    opened = probes._open_unread_sessions_and_collect_messages(
+        window,
+        [{"chat_name": "a"}],
+        max_controls=12,
+        on_chat_opened=reported.append,
+        report_progress=lambda stage, extra=None: progress.append((stage, extra)),
+    )
+
+    assert len(opened) == 1
+    assert opened[0]["status"] == "no_click_point"
+    assert reported == [opened[0]]
+    assert [stage for stage, _extra in progress].count("open_unread.chat") == 1
+    assert [extra for stage, extra in progress if stage == "open_unread.chat"] == [{"chat": opened[0]}]
+
+
+def test_probe_sessions_after_wakeup_with_timeout_dispatches_parent_chat_callback(monkeypatch) -> None:
+    messages = [
+        {"status": "progress", "stage": "open_unread.chat", "chat": {"chat_name": "a"}},
+        {"status": "ok", "opened_unread_chats": []},
+    ]
+    captured: dict[str, object] = {}
+    opened: list[dict[str, object]] = []
+
+    class FakeQueue:
+        def __init__(self, maxsize: int) -> None:
+            captured["queue_maxsize"] = maxsize
+
+        def get_nowait(self) -> dict[str, object]:
+            if not messages:
+                raise probes.queue.Empty
+            return messages.pop(0)
+
+    class FakeProcess:
+        daemon = False
+        exitcode = 0
+
+        def __init__(self, *, target, args) -> None:
+            captured["target"] = target
+            captured["args"] = args
+
+        def start(self) -> None:
+            captured["started"] = True
+
+        def is_alive(self) -> bool:
+            return False
+
+        def join(self, timeout: float | None = None) -> None:
+            captured["join_timeout"] = timeout
+
+    class FakeContext:
+        def Queue(self, maxsize: int) -> FakeQueue:
+            return FakeQueue(maxsize)
+
+        def Process(self, *, target, args) -> FakeProcess:
+            return FakeProcess(target=target, args=args)
+
+    monkeypatch.setattr(probes.mp, "get_context", lambda method: FakeContext())
+    callback = lambda chat: opened.append(chat)
+
+    result = probes._probe_sessions_after_wakeup_with_timeout(
+        max_controls=12,
+        timeout=5.0,
+        restore_icons=[{"source": "taskbar"}],
+        open_unread_messages=True,
+        max_unread_chats=3,
+        max_ui_busy_seconds=9.5,
+        on_chat_opened=callback,
+    )
+
+    args = captured["args"]
+    assert result["status"] == "ok"
+    assert [chat["chat_name"] for chat in opened] == ["a"]
+    assert len(args) == 6
+    assert args[1:] == (12, [{"source": "taskbar"}], True, 3, 9.5)
+    assert callback not in args
+
+
 def test_find_red_components_returns_badge_candidates() -> None:
     width = 20
     height = 16
