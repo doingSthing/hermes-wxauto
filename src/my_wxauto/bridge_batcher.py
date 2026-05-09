@@ -34,22 +34,35 @@ class ConversationBatcher:
         self._open: dict[str, _OpenBatch] = {}
 
     def add_messages(self, chat_name: str, messages: tuple[BridgeMessage, ...], *, now: float) -> int:
+        keyed_messages = tuple(message.with_key() for message in messages)
+        for keyed in keyed_messages:
+            if keyed.chat_name != chat_name:
+                raise ValueError(f"message chat_name {keyed.chat_name!r} does not match {chat_name!r}")
+
+        existing = self._open.get(chat_name)
+        existing_count = existing.message_count if existing is not None else 0
+        remaining_capacity = max(self.config.max_batch_messages - existing_count, 0)
         accepted: list[BridgeMessage] = []
-        for message in messages:
-            keyed = message.with_key()
+        accepted_keys: set[str] = set()
+        for keyed in keyed_messages:
             if keyed.is_self is True:
                 continue
             if self.store.matches_outgoing_echo(chat_name, keyed.content, now=now):
+                self.store.record_seen_message(keyed, now=now)
                 continue
-            if not self.store.record_seen_message(keyed, now=now):
+            if self.store.is_seen(keyed.message_key):
                 continue
+            if keyed.message_key in accepted_keys:
+                continue
+            if len(accepted) >= remaining_capacity:
+                break
             accepted.append(keyed)
+            accepted_keys.add(keyed.message_key)
         if not accepted:
             return 0
 
-        existing = self._open.get(chat_name)
         if existing is None:
-            self._open[chat_name] = _OpenBatch(
+            updated = _OpenBatch(
                 batch_id=f"wechat-batch-{uuid.uuid4().hex}",
                 chat_name=chat_name,
                 messages=tuple(accepted),
@@ -57,13 +70,17 @@ class ConversationBatcher:
                 last_message_at=now,
             )
         else:
-            self._open[chat_name] = _OpenBatch(
+            updated = _OpenBatch(
                 batch_id=existing.batch_id,
                 chat_name=existing.chat_name,
                 messages=(*existing.messages, *accepted),
                 created_at=existing.created_at,
                 last_message_at=now,
             )
+        self.store.save_batch(self._to_event(updated, status="open"))
+        self._open[chat_name] = updated
+        for keyed in accepted:
+            self.store.record_seen_message(keyed, now=now)
         return len(accepted)
 
     def open_batch_for(self, chat_name: str) -> _OpenBatch | None:
@@ -74,14 +91,7 @@ class ConversationBatcher:
         for chat_name, batch in list(self._open.items()):
             if not self._is_due(batch, now=now):
                 continue
-            event = ConversationBatch(
-                batch_id=batch.batch_id,
-                chat_name=batch.chat_name,
-                messages=batch.messages,
-                created_at=batch.created_at,
-                frozen_at=now,
-                status="frozen",
-            )
+            event = self._to_event(batch, frozen_at=now, status="frozen")
             self.store.save_batch(event)
             frozen.append(event)
             del self._open[chat_name]
@@ -93,3 +103,19 @@ class ConversationBatcher:
         if now - batch.created_at >= self.config.max_batch_wait_seconds:
             return True
         return now - batch.last_message_at >= self.config.quiet_window_seconds
+
+    def _to_event(
+        self,
+        batch: _OpenBatch,
+        *,
+        frozen_at: float | None = None,
+        status: str,
+    ) -> ConversationBatch:
+        return ConversationBatch(
+            batch_id=batch.batch_id,
+            chat_name=batch.chat_name,
+            messages=batch.messages,
+            created_at=batch.created_at,
+            frozen_at=frozen_at,
+            status=status,
+        )
