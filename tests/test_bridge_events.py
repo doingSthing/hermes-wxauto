@@ -39,6 +39,29 @@ def test_make_message_key_uses_occurrence_index_for_repeated_text() -> None:
     assert make_message_key(first) != make_message_key(second)
 
 
+def test_make_message_key_ignores_sender_resolution_fields() -> None:
+    unresolved = BridgeMessage(
+        chat_name="张勋、张盼",
+        content="在不在嘛",
+        message_type="text",
+        sender=None,
+        is_self=None,
+        time_text="15:41",
+        occurrence_index=0,
+    )
+    resolved = BridgeMessage(
+        chat_name="张勋、张盼",
+        content="在不在嘛",
+        message_type="text",
+        sender="张勋",
+        is_self=False,
+        time_text="15:41",
+        occurrence_index=0,
+    )
+
+    assert make_message_key(unresolved) == make_message_key(resolved)
+
+
 def test_messages_from_chat_payload_adds_keys_and_occurrence_indexes() -> None:
     messages = messages_from_chat_payload(
         {
@@ -95,6 +118,41 @@ def test_messages_from_chat_payload_key_ignores_unrelated_preceding_message() ->
     assert without_preceding[0].occurrence_index == 0
     assert with_preceding[1].occurrence_index == 0
     assert without_preceding[0].message_key == with_preceding[1].message_key
+
+
+def test_messages_from_chat_payload_keeps_key_stable_after_sender_resolution() -> None:
+    unresolved = messages_from_chat_payload(
+        {
+            "chat_name": "张勋、张盼",
+            "messages": [
+                {
+                    "content": "在不在嘛",
+                    "message_type": "text",
+                    "time_text": "15:41",
+                },
+            ],
+        }
+    )
+    resolved = messages_from_chat_payload(
+        {
+            "chat_name": "张勋、张盼",
+            "messages": [
+                {
+                    "content": "在不在嘛",
+                    "message_type": "text",
+                    "sender": "张勋",
+                    "is_self": False,
+                    "time_text": "15:41",
+                },
+            ],
+        }
+    )
+
+    assert unresolved[0].occurrence_index == 0
+    assert resolved[0].occurrence_index == 0
+    assert unresolved[0].message_key == resolved[0].message_key
+    assert resolved[0].sender == "张勋"
+    assert resolved[0].is_self is False
 
 
 def test_messages_from_chat_payload_distinguishes_identical_repeated_messages() -> None:

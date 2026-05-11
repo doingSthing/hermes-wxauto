@@ -86,8 +86,6 @@ class ConversationBatch:
 def make_message_key(message: BridgeMessage) -> str:
     payload = {
         "chat_name": message.chat_name,
-        "sender": message.sender,
-        "is_self": message.is_self,
         "message_type": message.message_type,
         "content": message.content,
         "time_text": message.time_text,
@@ -114,7 +112,7 @@ def messages_from_chat_payload(chat: dict[str, Any]) -> tuple[BridgeMessage, ...
         sender = _optional_str(payload.get("sender"))
         is_self = _optional_bool(payload.get("is_self"))
         time_text = _optional_str(payload.get("time_text"))
-        fingerprint = (chat_name, sender, is_self, message_type, content, time_text)
+        fingerprint = (chat_name, message_type, content, time_text)
         occurrence_index = occurrences.get(fingerprint, 0)
         occurrences[fingerprint] = occurrence_index + 1
         message = BridgeMessage(
