@@ -34,6 +34,19 @@ wx.listen_conversation_batches(
 The listener does not send multiple unrelated conversations as one model
 request. Each emitted batch belongs to one WeChat conversation.
 
+Sender resolution is opt-in because it clicks visible avatars and may slow down
+or disturb the WeChat UI. Enable it only when the robot needs group-chat sender
+names:
+
+```python
+wx.listen_conversation_batches(
+    on_batch,
+    max_chats_per_drain=5,
+    resolve_senders="profile_card",
+    sender_resolve_limit=5,
+)
+```
+
 ## 免责声明
 
 本工具仅供学习研究使用。使用者应遵守微信用户协议及相关法律法规，并自行承担使用本工具产生的风险与责任。

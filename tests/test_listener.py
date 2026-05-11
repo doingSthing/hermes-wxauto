@@ -571,15 +571,29 @@ def test_wechat_listen_conversation_batches_delegates_to_listener(monkeypatch) -
 
     def fake_listen_conversation_batches(callback_arg, **kwargs: object) -> str:
         calls.append({"callback": callback_arg, **kwargs})
-        return "batch-stats"
+        return "stats"
 
     monkeypatch.setattr(listener, "listen_conversation_batches", fake_listen_conversation_batches)
 
     wx = WeChat(prefer_wxauto4=False)
-    result = wx.listen_conversation_batches(callback, seconds=3, max_events=1)
+    result = wx.listen_conversation_batches(
+        callback,
+        seconds=3,
+        max_events=1,
+        resolve_senders="profile_card",
+        sender_resolve_limit=2,
+    )
 
-    assert result == "batch-stats"
-    assert calls == [{"callback": callback, "seconds": 3, "max_events": 1}]
+    assert result == "stats"
+    assert calls == [
+        {
+            "callback": callback,
+            "seconds": 3,
+            "max_events": 1,
+            "resolve_senders": "profile_card",
+            "sender_resolve_limit": 2,
+        }
+    ]
 
 
 def test_bridge_public_exports() -> None:
