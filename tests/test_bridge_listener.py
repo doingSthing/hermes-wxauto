@@ -11,6 +11,75 @@ from my_wxauto.bridge_store import BridgeStore
 from my_wxauto.listener import listen_conversation_batches
 
 
+def test_resolve_probe_chat_senders_returns_original_payload_when_disabled(monkeypatch) -> None:
+    chat = {
+        "chat_name": "group",
+        "message_region": {"left": 100, "top": 200, "right": 900, "bottom": 700},
+        "messages": [
+            {
+                "content": "hello",
+                "message_type": "text",
+                "sender": None,
+                "rect": {"left": 320, "top": 260, "right": 620, "bottom": 310},
+            }
+        ],
+    }
+
+    def fail_resolver(*_args: object, **_kwargs: object) -> str | None:
+        raise AssertionError("sender resolver should not run in default mode")
+
+    monkeypatch.setattr(listener, "_resolve_sender_from_profile_card", fail_resolver)
+
+    assert listener._resolve_probe_chat_senders(chat, resolve_senders=False) is chat
+
+
+def test_resolve_probe_chat_senders_enriches_sender_before_batching(monkeypatch) -> None:
+    chat = {
+        "chat_name": "group",
+        "message_region": {"left": 100, "top": 200, "right": 900, "bottom": 700},
+        "messages": [
+            {
+                "content": "hello",
+                "message_type": "text",
+                "sender": None,
+                "raw_name": "hello",
+                "class_name": "mmui::ChatTextItemView",
+                "automation_id": "chat_message_list.qt_scrollarea_viewport.chat_bubble_item_view",
+                "rect": {"left": 320, "top": 260, "right": 620, "bottom": 310},
+            }
+        ],
+    }
+    resolver_calls: list[str] = []
+    progress_events: list[dict[str, object]] = []
+
+    def fake_resolver(message: listener.ChatMessage, **_kwargs: object) -> str | None:
+        resolver_calls.append(message.content)
+        return "Alice"
+
+    monkeypatch.setattr(listener, "_resolve_sender_from_profile_card", fake_resolver)
+    monkeypatch.setattr(
+        listener,
+        "_annotate_messages_with_self_flags",
+        lambda messages, _region: [{**messages[0], "visible_rect": messages[0]["rect"], "is_self": False}],
+    )
+
+    enriched = listener._resolve_probe_chat_senders(
+        chat,
+        resolve_senders="profile_card",
+        sender_resolve_limit=5,
+        sender_resolve_timeout=20.0,
+        profile_card_timeout=2.0,
+        sender_progress=progress_events.append,
+    )
+
+    assert enriched is not chat
+    assert resolver_calls == ["hello"]
+    assert enriched["messages"][0]["sender"] == "Alice"
+    assert enriched["messages"][0]["is_self"] is False
+    assert enriched["messages"][0]["visible_rect"] == {"left": 320, "top": 260, "right": 620, "bottom": 310}
+    assert [event["stage"] for event in progress_events] == ["start", "resolved"]
+
+
 def test_listen_conversation_batches_emits_one_batch_per_chat(monkeypatch, tmp_path) -> None:
     emitted = []
 

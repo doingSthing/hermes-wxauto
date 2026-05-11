@@ -11,7 +11,7 @@ from . import probes
 from .bridge_batcher import BatchingConfig, ConversationBatcher
 from .bridge_events import ConversationBatch, messages_from_chat_payload
 from .bridge_store import BridgeStore
-from .window import WeChatWindowController
+from .window import WeChatWindowController, WindowRect
 
 
 @dataclass(frozen=True)
@@ -255,6 +255,68 @@ def listen_conversation_batches(
 
     emit_due(time.time())
     return _stats(started, flash_count, event_count, stopped_reason)
+
+
+def _resolve_probe_chat_senders(
+    chat: dict[str, Any],
+    *,
+    resolve_senders: bool | str = False,
+    sender_resolve_limit: int = 5,
+    sender_resolve_timeout: float | None = 20.0,
+    profile_card_timeout: float = 2.0,
+    sender_progress: Callable[[dict[str, Any]], None] | None = None,
+) -> dict[str, Any]:
+    if not _sender_resolution_enabled(resolve_senders):
+        return chat
+
+    region = _window_rect_from_dict(chat.get("message_region"))
+    raw_messages = [
+        message
+        for message in (chat.get("messages") or [])
+        if isinstance(message, dict)
+    ]
+    if not raw_messages:
+        return chat
+
+    if region is not None:
+        raw_messages = [_message_with_visible_rect(message, region) for message in raw_messages]
+        raw_messages = _annotate_messages_with_self_flags(raw_messages, region)
+
+    messages = tuple(ChatMessage.from_probe(message) for message in raw_messages)
+    if not messages:
+        return chat
+
+    resolved = _resolve_visible_message_senders(
+        messages,
+        lambda message: _resolve_sender_from_profile_card(
+            message,
+            timeout=profile_card_timeout,
+            progress=sender_progress,
+        ),
+        limit=sender_resolve_limit,
+        timeout=sender_resolve_timeout,
+        progress=sender_progress,
+        candidate_filter=_message_has_avatar_candidates,
+    )
+    return {**chat, "messages": [message.to_dict() for message in resolved]}
+
+
+def _sender_resolution_enabled(resolve_senders: bool | str) -> bool:
+    return resolve_senders is True or resolve_senders == "profile_card"
+
+
+def _window_rect_from_dict(value: object) -> WindowRect | None:
+    if not isinstance(value, dict):
+        return None
+    try:
+        return WindowRect(
+            left=int(value["left"]),
+            top=int(value["top"]),
+            right=int(value["right"]),
+            bottom=int(value["bottom"]),
+        )
+    except (KeyError, TypeError, ValueError):
+        return None
 
 
 def get_latest_message(
@@ -734,6 +796,10 @@ def _resolve_visible_message_senders(
     total = len(messages)
     for index, message in enumerate(messages, 1):
         if message.sender:
+            resolved.append(message)
+            continue
+        if message.is_self is True:
+            _sender_progress(progress, "skipped_self", message, index=index, total=total, attempts=attempts)
             resolved.append(message)
             continue
         if candidate_filter is not None and not candidate_filter(message):

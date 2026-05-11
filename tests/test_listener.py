@@ -405,6 +405,44 @@ def test_get_visible_messages_skips_default_profile_card_resolution_for_non_text
     assert [message.sender for message in messages] == [None, "张勋"]
 
 
+def test_resolve_visible_message_senders_skips_self_messages() -> None:
+    messages = (
+        ChatMessage(
+            content="mine",
+            message_type="text",
+            is_self=True,
+            visible_rect={"left": 300, "top": 100, "right": 650, "bottom": 160},
+        ),
+        ChatMessage(
+            content="theirs",
+            message_type="text",
+            is_self=False,
+            visible_rect={"left": 300, "top": 180, "right": 650, "bottom": 240},
+        ),
+    )
+    resolver_calls: list[str] = []
+    progress_events: list[dict[str, object]] = []
+
+    def fake_resolver(message: ChatMessage) -> str | None:
+        resolver_calls.append(message.content)
+        return f"{message.content}-sender"
+
+    resolved = listener._resolve_visible_message_senders(
+        messages,
+        fake_resolver,
+        limit=0,
+        timeout=None,
+        progress=progress_events.append,
+        candidate_filter=lambda _message: True,
+    )
+
+    assert resolver_calls == ["theirs"]
+    assert resolved[0].sender is None
+    assert resolved[0].is_self is True
+    assert resolved[1].sender == "theirs-sender"
+    assert [event["stage"] for event in progress_events] == ["skipped_self", "start", "resolved"]
+
+
 def test_avatar_click_points_target_avatar_columns_from_message_row() -> None:
     message = ChatMessage(
         content="嗯",
