@@ -91,6 +91,22 @@ class ListenerStats:
     stopped_reason: str
 
 
+class _ListenerUiLock:
+    def __init__(self, lock: Any | None) -> None:
+        self._lock = lock
+        if lock is None:
+            return
+        if not callable(getattr(lock, "acquire", None)) or not callable(getattr(lock, "release", None)):
+            raise TypeError("ui_lock must provide acquire/release")
+
+    def acquire(self) -> None:
+        if self._lock is not None:
+            self._lock.acquire()
+
+    def release(self) -> None:
+        if self._lock is not None:
+            self._lock.release()
+
 def listen_new_messages(
     callback: Callable[[NewMessageEvent], None],
     *,
@@ -170,6 +186,7 @@ def listen_conversation_batches(
     sender_resolve_timeout: float | None = 20.0,
     profile_card_timeout: float = 2.0,
     sender_progress: Callable[[dict[str, Any]], None] | None = None,
+    ui_lock: Any | None = None,
 ) -> ListenerStats:
     """Listen for unread chats and synchronously deliver frozen batches.
 
@@ -186,6 +203,7 @@ def listen_conversation_batches(
     This is slower and may briefly disturb the WeChat UI, so keep it opt-in.
     """
 
+    listener_ui_lock = _ListenerUiLock(ui_lock)
     probes._ensure_windows()
     detector = probes.TaskbarFlashDetector(
         min_changes=min_changes,
@@ -227,11 +245,12 @@ def listen_conversation_batches(
                 stop_requested = True
                 return
 
-    def on_chat_opened(chat: dict[str, Any]) -> None:
+    def on_chat_opened(chat: dict[str, Any]) -> float | None:
         chat_name = str(chat.get("chat_name") or "")
         if not chat_name or not chat.get("messages"):
-            return
+            return None
         now = time.time()
+        chat = _chat_with_unread_suffix(chat)
         if _sender_resolution_enabled(resolve_senders):
             chat = _resolve_probe_chat_senders(
                 chat,
@@ -243,25 +262,52 @@ def listen_conversation_batches(
             )
         messages = messages_from_chat_payload(chat)
         if not messages:
-            return
+            return None
         batcher.add_messages(chat_name, messages, now=now)
-        emit_due(now)
+        return now
+
+    def emit_after_opened(chat: dict[str, Any]) -> None:
+        opened_at = on_chat_opened(chat)
+        if opened_at is not None:
+            emit_due(opened_at)
 
     while deadline is None or time.monotonic() < deadline:
-        icons = probes.inspect_wechat_taskbar_icons()
-        flash = detector.observe(time.monotonic(), probes._taskbar_signature(icons))
+        flash = None
+        listener_ui_lock.acquire()
+        try:
+            icons = probes.inspect_wechat_taskbar_icons()
+            flash = detector.observe(time.monotonic(), probes._taskbar_signature(icons))
+            if flash is not None:
+                flash_count += 1
+                effective_max_chats_per_drain = 1 if _sender_resolution_enabled(resolve_senders) else max_chats_per_drain
+                probe_on_chat_opened = emit_after_opened
+                if ui_lock is not None:
+
+                    def emit_after_opened_without_ui_lock(chat: dict[str, Any]) -> None:
+                        opened_at = on_chat_opened(chat)
+                        if opened_at is None:
+                            return
+                        listener_ui_lock.release()
+                        try:
+                            emit_due(opened_at)
+                        finally:
+                            listener_ui_lock.acquire()
+
+                    probe_on_chat_opened = emit_after_opened_without_ui_lock
+
+                probes._probe_sessions_after_wakeup_with_timeout(
+                    max_controls=max_controls,
+                    timeout=action_timeout,
+                    restore_icons=icons,
+                    open_unread_messages=True,
+                    max_unread_chats=effective_max_chats_per_drain,
+                    max_ui_busy_seconds=max_ui_busy_seconds,
+                    on_chat_opened=probe_on_chat_opened,
+                )
+        finally:
+            listener_ui_lock.release()
         if flash is not None:
-            flash_count += 1
-            effective_max_chats_per_drain = 1 if _sender_resolution_enabled(resolve_senders) else max_chats_per_drain
-            probes._probe_sessions_after_wakeup_with_timeout(
-                max_controls=max_controls,
-                timeout=action_timeout,
-                restore_icons=icons,
-                open_unread_messages=True,
-                max_unread_chats=effective_max_chats_per_drain,
-                max_ui_busy_seconds=max_ui_busy_seconds,
-                on_chat_opened=on_chat_opened,
-            )
+            emit_due(time.time())
             if stop_requested:
                 return _stats(started, flash_count, event_count, stopped_reason)
             if max_probes > 0 and flash_count >= max_probes:
@@ -333,6 +379,16 @@ def _sender_resolution_start_index(chat: dict[str, Any], message_count: int) -> 
     if unread_count <= 0:
         return 0
     return max(0, message_count - unread_count)
+
+
+def _chat_with_unread_suffix(chat: dict[str, Any]) -> dict[str, Any]:
+    messages = chat.get("messages")
+    if not isinstance(messages, list):
+        return chat
+    unread_count = _safe_int(chat.get("unread_count"))
+    if unread_count <= 0 or unread_count >= len(messages):
+        return chat
+    return {**chat, "messages": messages[-unread_count:]}
 
 
 def _window_rect_from_dict(value: object) -> WindowRect | None:
