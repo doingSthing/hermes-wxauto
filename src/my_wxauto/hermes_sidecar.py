@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import json
-from typing import Any
+import subprocess
+from collections.abc import Sequence
+from dataclasses import dataclass
+from typing import Any, Protocol
 from urllib import parse, request
 
 
@@ -60,6 +63,95 @@ class BridgeClient:
             raise RuntimeError("bridge response must be a JSON object")
 
         return result
+
+
+class BridgeLike(Protocol):
+    def health(self) -> dict[str, Any]:
+        ...
+
+    def send(self, who: str, message: str) -> dict[str, Any]:
+        ...
+
+
+class HermesLike(Protocol):
+    def ask(self, prompt: str, *, session_name: str) -> str:
+        ...
+
+
+@dataclass(frozen=True)
+class SidecarConfig:
+    bridge_url: str = "http://127.0.0.1:8765"
+    poll_timeout: float = 30.0
+    poll_limit: int = 5
+    hermes_command: tuple[str, ...] = ("wsl.exe", "hermes")
+    hermes_timeout: float = 120.0
+    dry_run: bool = False
+    once: bool = False
+    retry_delay: float = 3.0
+
+
+class HermesRunner:
+    def __init__(self, command: Sequence[str], *, timeout: float) -> None:
+        self.command = tuple(command)
+        self.timeout = timeout
+
+    def ask(self, prompt: str, *, session_name: str) -> str:
+        result = subprocess.run(
+            [
+                *self.command,
+                "chat",
+                "-q",
+                prompt,
+                "-Q",
+                "--continue",
+                session_name,
+                "--source",
+                "tool",
+            ],
+            text=True,
+            capture_output=True,
+            timeout=self.timeout,
+            check=True,
+        )
+        return result.stdout.strip()
+
+
+class HermesSidecar:
+    def __init__(
+        self,
+        config: SidecarConfig,
+        bridge: BridgeLike | None = None,
+        hermes: HermesLike | None = None,
+    ) -> None:
+        self.config = config
+        self.bridge = bridge if bridge is not None else BridgeClient(config.bridge_url)
+        self.hermes = hermes if hermes is not None else HermesRunner(
+            config.hermes_command,
+            timeout=config.hermes_timeout,
+        )
+
+    def check_health(self) -> dict[str, Any]:
+        payload = self.bridge.health()
+        if payload.get("status") != "ok":
+            raise RuntimeError(f"bridge is not healthy: {payload}")
+        return payload
+
+    def process_event(self, event: dict[str, Any]) -> str | None:
+        chat_name = _normalize_text(event.get("chat_name")).strip()
+        if not chat_name:
+            return None
+
+        prompt = format_prompt(event)
+        reply = self.hermes.ask(prompt, session_name=session_name_for_chat(chat_name)).strip()
+        if not reply:
+            return None
+
+        if self.config.dry_run:
+            print(f"[dry-run] {chat_name}: {reply}")
+            return reply
+
+        self.bridge.send(chat_name, reply)
+        return reply
 
 
 def format_prompt(event: dict[str, Any]) -> str:

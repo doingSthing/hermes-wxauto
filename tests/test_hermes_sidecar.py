@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 
 import pytest
 
@@ -20,6 +21,29 @@ class _Response:
 
     def read(self) -> bytes:
         return self.body
+
+
+class _FakeBridge:
+    def __init__(self, health_payload: dict[str, object] | None = None) -> None:
+        self.health_payload = health_payload or {"status": "ok"}
+        self.sent: list[tuple[str, str]] = []
+
+    def health(self) -> dict[str, object]:
+        return self.health_payload
+
+    def send(self, who: str, message: str) -> dict[str, object]:
+        self.sent.append((who, message))
+        return {"sent": True}
+
+
+class _FakeHermes:
+    def __init__(self, reply: str = " reply ") -> None:
+        self.reply = reply
+        self.calls: list[tuple[str, str]] = []
+
+    def ask(self, prompt: str, *, session_name: str) -> str:
+        self.calls.append((prompt, session_name))
+        return self.reply
 
 
 def test_format_prompt_includes_chat_and_messages() -> None:
@@ -153,3 +177,124 @@ def test_bridge_client_rejects_non_object_json(monkeypatch: pytest.MonkeyPatch) 
 
     with pytest.raises(RuntimeError, match="bridge response must be a JSON object"):
         client.health()
+
+
+def test_hermes_runner_invokes_command(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = []
+
+    def fake_run(
+        args: list[str],
+        *,
+        text: bool,
+        capture_output: bool,
+        timeout: float,
+        check: bool,
+    ) -> subprocess.CompletedProcess[str]:
+        calls.append(
+            {
+                "args": args,
+                "text": text,
+                "capture_output": capture_output,
+                "timeout": timeout,
+                "check": check,
+            }
+        )
+        return subprocess.CompletedProcess(args=args, returncode=0, stdout=" answer \n")
+
+    monkeypatch.setattr(hermes_sidecar.subprocess, "run", fake_run)
+
+    runner = hermes_sidecar.HermesRunner(("wsl.exe", "hermes"), timeout=12.5)
+    result = runner.ask("hello", session_name="wxauto-session")
+
+    assert result == "answer"
+    assert calls == [
+        {
+            "args": [
+                "wsl.exe",
+                "hermes",
+                "chat",
+                "-q",
+                "hello",
+                "-Q",
+                "--continue",
+                "wxauto-session",
+                "--source",
+                "tool",
+            ],
+            "text": True,
+            "capture_output": True,
+            "timeout": 12.5,
+            "check": True,
+        }
+    ]
+
+
+def test_sidecar_processes_event_and_sends_reply() -> None:
+    bridge = _FakeBridge()
+    hermes = _FakeHermes(" hello there \n")
+    sidecar = hermes_sidecar.HermesSidecar(hermes_sidecar.SidecarConfig(), bridge=bridge, hermes=hermes)
+
+    result = sidecar.process_event({"chat_name": " Test Chat ", "messages": [{"content": "hi"}]})
+
+    assert result == "hello there"
+    assert bridge.sent == [("Test Chat", "hello there")]
+    assert hermes.calls
+    prompt, session_name = hermes.calls[0]
+    assert "Test Chat" in prompt
+    assert session_name == session_name_for_chat("Test Chat")
+
+
+def test_sidecar_dry_run_does_not_send_reply(capsys: pytest.CaptureFixture[str]) -> None:
+    bridge = _FakeBridge()
+    hermes = _FakeHermes(" dry reply ")
+    config = hermes_sidecar.SidecarConfig(dry_run=True)
+    sidecar = hermes_sidecar.HermesSidecar(config, bridge=bridge, hermes=hermes)
+
+    result = sidecar.process_event({"chat_name": "Room", "messages": [{"content": "hi"}]})
+
+    assert result == "dry reply"
+    assert bridge.sent == []
+    assert capsys.readouterr().out == "[dry-run] Room: dry reply\n"
+
+
+def test_sidecar_empty_reply_does_not_send() -> None:
+    bridge = _FakeBridge()
+    hermes = _FakeHermes(" \n ")
+    sidecar = hermes_sidecar.HermesSidecar(hermes_sidecar.SidecarConfig(), bridge=bridge, hermes=hermes)
+
+    result = sidecar.process_event({"chat_name": "Room", "messages": [{"content": "hi"}]})
+
+    assert result is None
+    assert bridge.sent == []
+
+
+def test_sidecar_check_health_rejects_unhealthy_bridge() -> None:
+    bridge = _FakeBridge({"status": "starting"})
+    sidecar = hermes_sidecar.HermesSidecar(hermes_sidecar.SidecarConfig(), bridge=bridge, hermes=_FakeHermes())
+
+    with pytest.raises(RuntimeError, match="bridge is not healthy"):
+        sidecar.check_health()
+
+
+def test_sidecar_blank_chat_name_does_not_call_hermes() -> None:
+    bridge = _FakeBridge()
+    hermes = _FakeHermes("reply")
+    sidecar = hermes_sidecar.HermesSidecar(hermes_sidecar.SidecarConfig(), bridge=bridge, hermes=hermes)
+
+    result = sidecar.process_event({"chat_name": "   ", "messages": [{"content": "hi"}]})
+
+    assert result is None
+    assert hermes.calls == []
+    assert bridge.sent == []
+
+
+def test_sidecar_missing_chat_name_does_not_call_hermes() -> None:
+    bridge = _FakeBridge()
+    hermes = _FakeHermes("reply")
+    sidecar = hermes_sidecar.HermesSidecar(hermes_sidecar.SidecarConfig(), bridge=bridge, hermes=hermes)
+
+    result = sidecar.process_event({"messages": [{"content": "hi"}]})
+
+    assert result is None
+    assert hermes.calls == []
+    assert bridge.sent == []
