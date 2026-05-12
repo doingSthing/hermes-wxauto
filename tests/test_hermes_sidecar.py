@@ -1,6 +1,25 @@
 from __future__ import annotations
 
-from my_wxauto.hermes_sidecar import format_prompt, session_name_for_chat
+import json
+
+import pytest
+
+from my_wxauto import hermes_sidecar
+from my_wxauto.hermes_sidecar import BridgeClient, format_prompt, session_name_for_chat
+
+
+class _Response:
+    def __init__(self, body: bytes) -> None:
+        self.body = body
+
+    def __enter__(self) -> "_Response":
+        return self
+
+    def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+        return None
+
+    def read(self) -> bytes:
+        return self.body
 
 
 def test_format_prompt_includes_chat_and_messages() -> None:
@@ -61,3 +80,76 @@ def test_session_name_for_chat_normalizes_non_string_values() -> None:
     assert numeric_name.isascii()
     assert len(none_name) <= 48
     assert len(numeric_name) <= 48
+
+
+def test_bridge_client_gets_health(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = []
+
+    def fake_urlopen(req: object, timeout: float) -> _Response:
+        calls.append((req, timeout))
+        return _Response(b'{"ok": true}')
+
+    monkeypatch.setattr(hermes_sidecar.request, "urlopen", fake_urlopen)
+
+    client = BridgeClient("http://127.0.0.1:8765/", timeout=3.0)
+    result = client.health()
+
+    req, timeout = calls[0]
+    assert result == {"ok": True}
+    assert req.full_url == "http://127.0.0.1:8765/health"
+    assert req.get_method() == "GET"
+    assert timeout == 3.0
+
+
+def test_bridge_client_polls_events(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = []
+
+    def fake_urlopen(req: object, timeout: float) -> _Response:
+        calls.append((req, timeout))
+        return _Response(b'{"events": []}')
+
+    monkeypatch.setattr(hermes_sidecar.request, "urlopen", fake_urlopen)
+
+    client = BridgeClient("http://bridge", timeout=2.5)
+    result = client.poll_events(timeout=30.0, limit=10)
+
+    req, request_timeout = calls[0]
+    assert result == {"events": []}
+    assert req.full_url == "http://bridge/events?timeout=30.0&limit=10"
+    assert req.get_method() == "GET"
+    assert request_timeout == 32.5
+
+
+def test_bridge_client_sends_message(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = []
+
+    def fake_urlopen(req: object, timeout: float) -> _Response:
+        calls.append((req, timeout))
+        return _Response(b'{"sent": true}')
+
+    monkeypatch.setattr(hermes_sidecar.request, "urlopen", fake_urlopen)
+
+    client = BridgeClient("http://bridge", timeout=4.0)
+    result = client.send("张三", "你好")
+
+    req, timeout = calls[0]
+    assert result == {"sent": True}
+    assert req.full_url == "http://bridge/send"
+    assert req.get_method() == "POST"
+    assert json.loads(req.data.decode("utf-8")) == {"who": "张三", "message": "你好"}
+    assert "你好".encode("utf-8") in req.data
+    headers = {k.lower(): v for k, v in req.headers.items()}
+    assert headers["content-type"] == "application/json; charset=utf-8"
+    assert timeout == 4.0
+
+
+def test_bridge_client_rejects_non_object_json(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_urlopen(req: object, timeout: float) -> _Response:
+        return _Response(b'[]')
+
+    monkeypatch.setattr(hermes_sidecar.request, "urlopen", fake_urlopen)
+
+    client = BridgeClient("http://bridge")
+
+    with pytest.raises(RuntimeError, match="bridge response must be a JSON object"):
+        client.health()
