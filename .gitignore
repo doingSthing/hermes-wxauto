@@ -30,4 +30,4 @@ dist/
 Thumbs.db
 .DS_Store
 *.txt
-.my_wxauto_bridge.sqlite3
+*.sqlite3

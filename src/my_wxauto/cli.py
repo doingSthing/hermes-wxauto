@@ -5,6 +5,9 @@ import contextlib
 import json
 from pathlib import Path
 
+from .bridge_server import BridgeServerConfig, run_bridge_server
+from .bridge_events import ConversationBatch
+from .listener import ListenerStats
 from .wechat import SearchOptions, WeChat
 from .window import WeChatWindowController
 
@@ -33,6 +36,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--probe-no-taskbar", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--output", help="将命令输出直接写入 UTF-8 文件，避免 PowerShell 管道乱码")
     parser.add_argument("--append-output", action="store_true", help="配合 --output 使用，追加写入输出文件")
+    parser.add_argument("--store-path", default=".my_wxauto_bridge.sqlite3", help="桥接状态数据库路径；监听调试时建议传入独立文件")
+    parser.add_argument("--bridge-server", action="store_true", help="start the local HTTP bridge server")
+    parser.add_argument("--bridge-host", default="127.0.0.1", help="host for --bridge-server")
+    parser.add_argument("--bridge-port", type=int, default=8765, help="port for --bridge-server")
+    parser.add_argument("--bridge-queue-size", type=int, default=100, help="event queue size for --bridge-server")
+    parser.add_argument("--listen-batches", action="store_true", help="监听会话批次并输出去重诊断字段")
+    parser.add_argument("--listen-seconds", type=float, default=0.0, help="--listen-batches 的监听秒数；0 表示持续监听")
+    parser.add_argument("--listen-max-events", type=int, default=0, help="--listen-batches 最多输出的批次数；0 表示不限")
+    parser.add_argument("--listen-max-probes", type=int, default=0, help="--listen-batches 最多响应的闪烁探测次数；0 表示不限")
+    parser.add_argument("--listen-max-chats", type=int, default=5, help="每轮最多打开的未读会话数")
+    parser.add_argument("--listen-resolve-senders", choices=("none", "profile_card"), default="none", help="是否点击头像解析发送人")
+    parser.add_argument("--listen-sender-limit", type=int, default=5, help="每个会话最多解析的发送人数")
     parser.add_argument("--use-wxauto4", dest="use_wxauto4", action="store_true", default=True, help="默认开启：使用 wxauto4 构造器恢复/置前微信窗口")
     parser.add_argument("--no-wxauto4", dest="use_wxauto4", action="store_false", help="不使用 wxauto4 构造器，直接走窗口控制器")
     parser.add_argument("--click-search-box", action="store_true", help="使用坐标点击左上角搜索框")
@@ -66,6 +81,22 @@ def _run(args: argparse.Namespace) -> int:
     if args.diagnose:
         controller = WeChatWindowController()
         print(json.dumps(controller.diagnose(), ensure_ascii=False, indent=2))
+        return 0
+    if args.bridge_server:
+        run_bridge_server(
+            BridgeServerConfig(
+                host=args.bridge_host,
+                port=args.bridge_port,
+                store_path=args.store_path,
+                queue_size=args.bridge_queue_size,
+                max_chats_per_drain=args.listen_max_chats,
+                resolve_senders=_listener_sender_mode(args.listen_resolve_senders),
+                sender_resolve_limit=args.listen_sender_limit,
+                prefer_wxauto4=args.use_wxauto4,
+                debug=args.debug,
+                trace_ui=args.trace_ui,
+            )
+        )
         return 0
     if args.probe_listener_signals:
         from .probes import probe_listener_signals
@@ -115,6 +146,25 @@ def _run(args: argparse.Namespace) -> int:
             open_unread_messages=args.wakeup_open_unread,
         )
         return 0
+    if args.listen_batches:
+        wx = WeChat(
+            debug=args.debug,
+            trace_ui=args.trace_ui,
+            prefer_wxauto4=args.use_wxauto4,
+            bridge_store_path=args.store_path,
+        )
+        stats = wx.listen_conversation_batches(
+            _print_conversation_batch_debug,
+            seconds=args.listen_seconds,
+            max_events=args.listen_max_events,
+            max_probes=args.listen_max_probes,
+            max_chats_per_drain=args.listen_max_chats,
+            store_path=args.store_path,
+            resolve_senders=_listener_sender_mode(args.listen_resolve_senders),
+            sender_resolve_limit=args.listen_sender_limit,
+        )
+        _print_listener_stats(stats)
+        return 0
     if not args.who:
         build_parser().error("who is required unless --diagnose or a probe command is used")
 
@@ -133,6 +183,7 @@ def _run(args: argparse.Namespace) -> int:
         debug=args.debug,
         trace_ui=args.trace_ui,
         prefer_wxauto4=args.use_wxauto4,
+        bridge_store_path=args.store_path,
     )
     if args.message is None:
         result = wx.ChatWith(args.who)
@@ -140,3 +191,41 @@ def _run(args: argparse.Namespace) -> int:
         result = wx.SendMsg(args.message, args.who)
     print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2))
     return 0 if result else 1
+
+
+def _listener_sender_mode(value: str) -> bool | str:
+    return False if value == "none" else value
+
+
+def _print_conversation_batch_debug(batch: ConversationBatch) -> None:
+    print(f"chat: {batch.chat_name}")
+    print(f"message_count: {batch.message_count}")
+    for message in batch.messages:
+        keyed = message.with_key()
+        print(
+            "- "
+            f"key={keyed.message_key[:12]} "
+            f"index={keyed.occurrence_index} "
+            f"time={_debug_value(keyed.time_text)} "
+            f"sender={_debug_value(keyed.sender)} "
+            f"is_self={keyed.is_self} "
+            f"type={keyed.message_type} "
+            f"content={keyed.content}"
+        )
+    print("-" * 40)
+
+
+def _print_listener_stats(stats: ListenerStats) -> None:
+    print(
+        "listener_stats: "
+        f"flash_count={stats.flash_count} "
+        f"event_count={stats.event_count} "
+        f"duration_seconds={stats.duration_seconds:.3f} "
+        f"stopped_reason={stats.stopped_reason}"
+    )
+
+
+def _debug_value(value: object) -> str:
+    if value is None:
+        return "None"
+    return str(value)

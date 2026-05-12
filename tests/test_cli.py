@@ -6,8 +6,10 @@ import subprocess
 import sys
 from pathlib import Path
 
+from my_wxauto import BridgeMessage, ConversationBatch
 from my_wxauto import probes
 from my_wxauto import cli
+from my_wxauto.listener import ListenerStats
 from my_wxauto.response import WxResponse
 
 
@@ -39,6 +41,7 @@ class FakeWeChat:
     def __init__(self, **kwargs: object) -> None:
         self.kwargs = kwargs
         self.calls: list[tuple[str, tuple[object, ...]]] = []
+        self.listen_kwargs: dict[str, object] = {}
         FakeWeChat.instances.append(self)
 
     def ChatWith(self, who: str) -> WxResponse:
@@ -48,6 +51,35 @@ class FakeWeChat:
     def SendMsg(self, msg: str, who: str) -> WxResponse:
         self.calls.append(("SendMsg", (msg, who)))
         return WxResponse.success("sent", {"who": who, "message": msg})
+
+    def listen_conversation_batches(self, callback, **kwargs: object) -> ListenerStats:
+        self.calls.append(("listen_conversation_batches", (callback,)))
+        self.listen_kwargs = kwargs
+        message = BridgeMessage(
+            chat_name="group",
+            content="hello",
+            message_type="text",
+            sender="alice",
+            is_self=False,
+            time_text="15:41",
+            occurrence_index=2,
+        ).with_key()
+        callback(
+            ConversationBatch(
+                batch_id="batch-1",
+                chat_name="group",
+                messages=(message,),
+                created_at=10.0,
+                frozen_at=12.0,
+                status="frozen",
+            )
+        )
+        return ListenerStats(
+            flash_count=1,
+            event_count=1,
+            duration_seconds=2.5,
+            stopped_reason="max_events",
+        )
 
 
 def test_main_runs_wakeup_probe(monkeypatch, capsys) -> None:
@@ -136,3 +168,111 @@ def test_main_writes_utf8_output_file(monkeypatch, capsys, tmp_path) -> None:
     output = json.loads(output_path.read_text(encoding="utf-8"))
     assert output["status"] == "success"
     assert output["data"]["who"] == "张三"
+
+
+def test_main_listens_conversation_batches_with_debug_fields(monkeypatch, capsys, tmp_path) -> None:
+    FakeWeChat.instances.clear()
+    monkeypatch.setattr(cli, "WeChat", FakeWeChat)
+    store_path = tmp_path / "debug.sqlite3"
+
+    exit_code = cli.main(
+        [
+            "--listen-batches",
+            "--listen-seconds",
+            "30",
+            "--listen-max-events",
+            "1",
+            "--listen-max-probes",
+            "2",
+            "--listen-max-chats",
+            "3",
+            "--listen-resolve-senders",
+            "profile_card",
+            "--listen-sender-limit",
+            "4",
+            "--store-path",
+            str(store_path),
+        ]
+    )
+
+    output = capsys.readouterr().out
+    wx = FakeWeChat.instances[0]
+    message_key = BridgeMessage(
+        chat_name="group",
+        content="hello",
+        message_type="text",
+        sender="alice",
+        is_self=False,
+        time_text="15:41",
+        occurrence_index=2,
+    ).with_key().message_key
+
+    assert exit_code == 0
+    assert wx.kwargs["bridge_store_path"] == str(store_path)
+    assert wx.calls[0][0] == "listen_conversation_batches"
+    assert wx.listen_kwargs == {
+        "seconds": 30.0,
+        "max_events": 1,
+        "max_probes": 2,
+        "max_chats_per_drain": 3,
+        "store_path": str(store_path),
+        "resolve_senders": "profile_card",
+        "sender_resolve_limit": 4,
+    }
+    assert "chat: group" in output
+    assert "message_count: 1" in output
+    assert f"key={message_key[:12]}" in output
+    assert "index=2" in output
+    assert "time=15:41" in output
+    assert "sender=alice" in output
+    assert "is_self=False" in output
+    assert "type=text" in output
+    assert "content=hello" in output
+    assert "stopped_reason=max_events" in output
+
+
+def test_main_starts_bridge_server(monkeypatch, tmp_path) -> None:
+    calls: list[object] = []
+    store_path = tmp_path / "bridge.sqlite3"
+
+    def fake_run_bridge_server(config: object) -> None:
+        calls.append(config)
+
+    monkeypatch.setattr(cli, "run_bridge_server", fake_run_bridge_server)
+
+    exit_code = cli.main(
+        [
+            "--bridge-server",
+            "--bridge-host",
+            "0.0.0.0",
+            "--bridge-port",
+            "9876",
+            "--bridge-queue-size",
+            "7",
+            "--store-path",
+            str(store_path),
+            "--listen-max-chats",
+            "3",
+            "--listen-resolve-senders",
+            "profile_card",
+            "--listen-sender-limit",
+            "4",
+            "--no-wxauto4",
+            "--debug",
+            "--trace-ui",
+        ]
+    )
+
+    assert exit_code == 0
+    assert len(calls) == 1
+    config = calls[0]
+    assert config.host == "0.0.0.0"
+    assert config.port == 9876
+    assert config.queue_size == 7
+    assert config.store_path == str(store_path)
+    assert config.max_chats_per_drain == 3
+    assert config.resolve_senders == "profile_card"
+    assert config.sender_resolve_limit == 4
+    assert config.prefer_wxauto4 is False
+    assert config.debug is True
+    assert config.trace_ui is True
