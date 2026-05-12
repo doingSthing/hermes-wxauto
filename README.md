@@ -81,6 +81,30 @@ POST http://127.0.0.1:8765/send
 
 `/events` 响应中的 `events` 是单个会话批次列表。外部机器人应逐会话处理，避免把多个会话混进同一个模型请求。
 
+## Hermes sidecar adapter
+
+如果 WSL 中已经安装 Hermes，可以让 sidecar adapter 把微信事件交给 Hermes 思考，再把回复发回微信。
+
+先启动 Windows 微信桥：
+
+```powershell
+python -m my_wxauto --bridge-server --bridge-host 127.0.0.1 --bridge-port 8765
+```
+
+再启动 sidecar：
+
+```powershell
+python -m my_wxauto.hermes_sidecar --bridge-url http://127.0.0.1:8765
+```
+
+首次验证建议使用 dry-run，不真正发送微信消息：
+
+```powershell
+python -m my_wxauto.hermes_sidecar --bridge-url http://127.0.0.1:8765 --dry-run --once
+```
+
+第一版 sidecar 按会话顺序处理事件，并为每个微信会话使用独立 Hermes session。它还不支持同会话新消息到达时取消正在生成的旧回复；这个能力会在后续版本中补充。
+
 ## 免责声明
 
 本工具仅供学习研究使用。使用者应遵守微信用户协议及相关法律法规，并自行承担使用本工具产生的风险与责任。
