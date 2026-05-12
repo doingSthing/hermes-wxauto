@@ -1,13 +1,19 @@
 from __future__ import annotations
 
+import json
 import queue
 import threading as _threading
 from dataclasses import dataclass
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs, urlparse
 
 from .bridge_events import ConversationBatch
 from .wechat import WeChat
+
+
+MAX_JSON_BODY_BYTES = 1024 * 1024
 
 
 class _ThreadingProxy:
@@ -106,12 +112,131 @@ class BridgeRuntime:
         )
 
 
+class BridgeHTTPServer(ThreadingHTTPServer):
+    daemon_threads = True
+
+    def __init__(
+        self,
+        server_address: tuple[str, int],
+        RequestHandlerClass: type[BaseHTTPRequestHandler],
+        *,
+        runtime: BridgeRuntime,
+        bind_and_activate: bool = True,
+    ) -> None:
+        super().__init__(server_address, RequestHandlerClass, bind_and_activate=bind_and_activate)
+        self.runtime = runtime
+
+
+class BridgeRequestHandler(BaseHTTPRequestHandler):
+    server: BridgeHTTPServer
+
+    def do_GET(self) -> None:
+        parsed_url = urlparse(self.path)
+        if parsed_url.path == "/health":
+            self._send_json(200, self.server.runtime.health())
+            return
+
+        if parsed_url.path == "/events":
+            query = parse_qs(parsed_url.query)
+            timeout = _first_query_value(query, "timeout", 30.0)
+            limit = _first_query_value(query, "limit", 5)
+            payload = self.server.runtime.poll_events(timeout=timeout, limit=limit)
+            self._send_json(200, payload)
+            return
+
+        self._send_json(404, {"status": "error", "message": "not found"})
+
+    def do_POST(self) -> None:
+        parsed_url = urlparse(self.path)
+        if parsed_url.path != "/send":
+            self._send_json(404, {"status": "error", "message": "not found"})
+            return
+
+        payload = self._read_json_body()
+        if payload is None:
+            return
+
+        who = payload.get("who")
+        message = payload.get("message")
+        if not isinstance(who, str) or not who or not isinstance(message, str) or not message:
+            self._send_json(400, {"status": "error", "message": "who and message are required"})
+            return
+
+        self._send_json(200, self.server.runtime.send_message(who, message))
+
+    def log_message(self, format: str, *args: object) -> None:
+        return
+
+    def _read_json_body(self) -> dict[str, Any] | None:
+        content_length_header = self.headers.get("Content-Length", "0")
+        try:
+            content_length = int(content_length_header)
+        except ValueError:
+            self._send_json(400, {"status": "error", "message": "Invalid Content-Length"})
+            return None
+        if content_length < 0:
+            self._send_json(400, {"status": "error", "message": "Invalid Content-Length"})
+            return None
+        if content_length > MAX_JSON_BODY_BYTES:
+            self._send_json(413, {"status": "error", "message": "JSON body too large"})
+            return None
+        raw_body = self.rfile.read(content_length)
+        try:
+            payload = json.loads(raw_body.decode("utf-8") if raw_body else "{}")
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            self._send_json(400, {"status": "error", "message": "Invalid JSON body"})
+            return None
+        if not isinstance(payload, dict):
+            self._send_json(400, {"status": "error", "message": "JSON body must be an object"})
+            return None
+        return payload
+
+    def _send_json(self, status_code: int, payload: dict[str, Any]) -> None:
+        response_body = json.dumps(payload).encode("utf-8")
+        self.send_response(status_code)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(response_body)))
+        self.end_headers()
+        self.wfile.write(response_body)
+
+
+def create_bridge_server(
+    config: BridgeServerConfig,
+    *,
+    wechat: Any | None = None,
+    ui_lock: Any | None = None,
+) -> BridgeHTTPServer:
+    runtime = BridgeRuntime(config, wechat=wechat, ui_lock=ui_lock)
+    server = BridgeHTTPServer((config.host, config.port), BridgeRequestHandler, runtime=runtime)
+    try:
+        runtime.start_listener()
+    except Exception:
+        server.server_close()
+        raise
+    return server
+
+
+def run_bridge_server(config: BridgeServerConfig) -> None:
+    server = create_bridge_server(config)
+    try:
+        server.serve_forever()
+    finally:
+        server.server_close()
+
+
 def _clamp_float(value: object, *, minimum: float, maximum: float, default: float) -> float:
     try:
         parsed = float(value)
     except (TypeError, ValueError):
         return default
     return max(minimum, min(maximum, parsed))
+
+
+def _first_query_value(query: dict[str, list[str]], key: str, default: object) -> object:
+    values = query.get(key)
+    if not values:
+        return default
+    return values[0]
 
 
 def _clamp_int(value: object, *, minimum: int, maximum: int, default: int) -> int:

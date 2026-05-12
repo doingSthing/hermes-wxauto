@@ -1,12 +1,22 @@
 from __future__ import annotations
 
+import http.client
+import json
 import queue
+import socket
 import threading
 
 import pytest
 
 from my_wxauto.bridge_events import BridgeMessage, ConversationBatch
-from my_wxauto.bridge_server import BridgeRuntime, BridgeServerConfig
+from my_wxauto.bridge_server import (
+    BridgeHTTPServer,
+    BridgeRequestHandler,
+    BridgeRuntime,
+    BridgeServerConfig,
+    create_bridge_server,
+    run_bridge_server,
+)
 from my_wxauto.response import WxResponse
 
 
@@ -42,6 +52,348 @@ def _batch(content: str = "hello") -> ConversationBatch:
         frozen_at=11.0,
         status="frozen",
     )
+
+
+class RunningServer:
+    def __init__(self, runtime: BridgeRuntime) -> None:
+        self.server = BridgeHTTPServer(("127.0.0.1", 0), BridgeRequestHandler, runtime=runtime)
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+
+    def __enter__(self):
+        self.thread.start()
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(timeout=1)
+        return False
+
+    @property
+    def host(self) -> str:
+        return self.server.server_address[0]
+
+    @property
+    def port(self) -> int:
+        return self.server.server_address[1]
+
+    def request(self, method: str, path: str, body: object | str | None = None):
+        headers = {}
+        encoded_body = None
+        if body is not None:
+            headers["Content-Type"] = "application/json"
+            encoded_body = body if isinstance(body, str) else json.dumps(body)
+        connection = http.client.HTTPConnection(self.host, self.port, timeout=2)
+        try:
+            connection.request(method, path, body=encoded_body, headers=headers)
+            response = connection.getresponse()
+            payload = json.loads(response.read().decode("utf-8"))
+            return response.status, response.getheader("Content-Type"), payload
+        finally:
+            connection.close()
+
+
+def _raw_http_request(host: str, port: int, request: str) -> tuple[int, dict[str, str], dict[str, object]]:
+    with socket.create_connection((host, port), timeout=2) as sock:
+        sock.sendall(request.encode("ascii"))
+        sock.shutdown(socket.SHUT_WR)
+        chunks = []
+        while True:
+            chunk = sock.recv(4096)
+            if not chunk:
+                break
+            chunks.append(chunk)
+
+    response = b"".join(chunks)
+    header_block, body = response.split(b"\r\n\r\n", 1)
+    header_lines = header_block.decode("iso-8859-1").split("\r\n")
+    status = int(header_lines[0].split()[1])
+    headers = {}
+    for line in header_lines[1:]:
+        key, value = line.split(":", 1)
+        headers[key.lower()] = value.strip()
+    return status, headers, json.loads(body.decode("utf-8"))
+
+
+def test_bridge_http_server_uses_daemon_request_threads() -> None:
+    assert BridgeHTTPServer.daemon_threads is True
+
+
+def test_http_health_endpoint() -> None:
+    runtime = BridgeRuntime(BridgeServerConfig(store_path="bridge.sqlite3"), wechat=FakeWeChat())
+
+    with RunningServer(runtime) as server:
+        status, content_type, payload = server.request("GET", "/health")
+
+    assert status == 200
+    assert content_type == "application/json; charset=utf-8"
+    assert payload == {
+        "status": "ok",
+        "queue_size": 0,
+        "listener_alive": False,
+        "store_path": "bridge.sqlite3",
+    }
+
+
+def test_http_events_endpoint_returns_queued_events() -> None:
+    runtime = BridgeRuntime(BridgeServerConfig(queue_size=2), wechat=FakeWeChat())
+    runtime.enqueue_batch(_batch("one"))
+    runtime.enqueue_batch(_batch("two"))
+
+    with RunningServer(runtime) as server:
+        status, content_type, payload = server.request("GET", "/events?timeout=0&limit=1")
+
+    assert status == 200
+    assert content_type == "application/json; charset=utf-8"
+    assert payload["status"] == "ok"
+    assert payload["count"] == 1
+    assert payload["events"][0]["messages"][0]["content"] == "one"
+    assert runtime.health()["queue_size"] == 1
+
+
+def test_http_events_endpoint_times_out_empty() -> None:
+    runtime = BridgeRuntime(BridgeServerConfig(), wechat=FakeWeChat())
+
+    with RunningServer(runtime) as server:
+        status, content_type, payload = server.request("GET", "/events?timeout=0.01&limit=5")
+
+    assert status == 200
+    assert content_type == "application/json; charset=utf-8"
+    assert payload == {"status": "ok", "count": 0, "events": []}
+
+
+def test_http_send_endpoint() -> None:
+    wx = FakeWeChat()
+    runtime = BridgeRuntime(BridgeServerConfig(), wechat=wx)
+
+    with RunningServer(runtime) as server:
+        status, content_type, payload = server.request(
+            "POST",
+            "/send",
+            {"who": "alice", "message": "hello"},
+        )
+
+    assert status == 200
+    assert content_type == "application/json; charset=utf-8"
+    assert payload["status"] == "success"
+    assert payload["data"] == {"who": "alice", "message": "hello"}
+    assert wx.sent == [("alice", "hello")]
+
+
+def test_http_send_rejects_invalid_json() -> None:
+    runtime = BridgeRuntime(BridgeServerConfig(), wechat=FakeWeChat())
+
+    with RunningServer(runtime) as server:
+        status, content_type, payload = server.request("POST", "/send", "{")
+
+    assert status == 400
+    assert content_type == "application/json; charset=utf-8"
+    assert payload["status"] == "error"
+    assert "Invalid JSON" in payload["message"]
+
+
+def test_http_send_rejects_non_integer_content_length() -> None:
+    runtime = BridgeRuntime(BridgeServerConfig(), wechat=FakeWeChat())
+
+    with RunningServer(runtime) as server:
+        status, headers, payload = _raw_http_request(
+            server.host,
+            server.port,
+            "POST /send HTTP/1.1\r\n"
+            f"Host: {server.host}:{server.port}\r\n"
+            "Content-Type: application/json\r\n"
+            "Content-Length: abc\r\n"
+            "\r\n",
+        )
+
+    assert status == 400
+    assert headers["content-type"] == "application/json; charset=utf-8"
+    assert payload == {"status": "error", "message": "Invalid Content-Length"}
+
+
+def test_http_send_rejects_negative_content_length() -> None:
+    runtime = BridgeRuntime(BridgeServerConfig(), wechat=FakeWeChat())
+
+    with RunningServer(runtime) as server:
+        status, headers, payload = _raw_http_request(
+            server.host,
+            server.port,
+            "POST /send HTTP/1.1\r\n"
+            f"Host: {server.host}:{server.port}\r\n"
+            "Content-Type: application/json\r\n"
+            "Content-Length: -1\r\n"
+            "\r\n",
+        )
+
+    assert status == 400
+    assert headers["content-type"] == "application/json; charset=utf-8"
+    assert payload == {"status": "error", "message": "Invalid Content-Length"}
+
+
+def test_http_send_rejects_too_large_content_length() -> None:
+    runtime = BridgeRuntime(BridgeServerConfig(), wechat=FakeWeChat())
+
+    with RunningServer(runtime) as server:
+        status, headers, payload = _raw_http_request(
+            server.host,
+            server.port,
+            "POST /send HTTP/1.1\r\n"
+            f"Host: {server.host}:{server.port}\r\n"
+            "Content-Type: application/json\r\n"
+            "Content-Length: 1048577\r\n"
+            "\r\n",
+        )
+
+    assert status == 413
+    assert headers["content-type"] == "application/json; charset=utf-8"
+    assert payload == {"status": "error", "message": "JSON body too large"}
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"message": "hello"},
+        {"who": "alice"},
+        {"who": "", "message": "hello"},
+        {"who": "alice", "message": ""},
+    ],
+)
+def test_http_send_rejects_missing_who_or_message(body: dict[str, str]) -> None:
+    runtime = BridgeRuntime(BridgeServerConfig(), wechat=FakeWeChat())
+
+    with RunningServer(runtime) as server:
+        status, content_type, payload = server.request("POST", "/send", body)
+
+    assert status == 400
+    assert content_type == "application/json; charset=utf-8"
+    assert payload == {"status": "error", "message": "who and message are required"}
+
+
+def test_http_unknown_route_returns_404() -> None:
+    runtime = BridgeRuntime(BridgeServerConfig(), wechat=FakeWeChat())
+
+    with RunningServer(runtime) as server:
+        status, content_type, payload = server.request("GET", "/missing")
+
+    assert status == 404
+    assert content_type == "application/json; charset=utf-8"
+    assert payload == {"status": "error", "message": "not found"}
+
+
+def test_create_bridge_server_starts_listener_and_returns_configured_server() -> None:
+    class BlockingWeChat(FakeWeChat):
+        def __init__(self) -> None:
+            super().__init__()
+            self.started = threading.Event()
+            self.release = threading.Event()
+
+        def listen_conversation_batches(self, callback, **kwargs: object):
+            self.started.set()
+            self.release.wait(timeout=1)
+            return super().listen_conversation_batches(callback, **kwargs)
+
+    wx = BlockingWeChat()
+    server = create_bridge_server(BridgeServerConfig(port=0), wechat=wx)
+    try:
+        assert wx.started.wait(timeout=1)
+        assert isinstance(server, BridgeHTTPServer)
+        assert server.runtime.health()["listener_alive"] is True
+        assert server.server_address[0] == "127.0.0.1"
+    finally:
+        wx.release.set()
+        server.server_close()
+
+
+def test_create_bridge_server_does_not_start_listener_when_server_construction_fails(monkeypatch) -> None:
+    events: list[str] = []
+
+    class FakeRuntime:
+        def __init__(self, config, **kwargs):
+            events.append("runtime")
+
+        def start_listener(self):
+            events.append("start_listener")
+
+    class FailingServer:
+        def __init__(self, address, handler, *, runtime):
+            events.append(f"server:{address[0]}:{address[1]}")
+            raise OSError("port in use")
+
+    monkeypatch.setattr("my_wxauto.bridge_server.BridgeRuntime", FakeRuntime)
+    monkeypatch.setattr("my_wxauto.bridge_server.BridgeHTTPServer", FailingServer)
+
+    with pytest.raises(OSError, match="port in use"):
+        create_bridge_server(BridgeServerConfig(port=0))
+
+    assert events == ["runtime", "server:127.0.0.1:0"]
+
+
+def test_create_bridge_server_closes_server_when_start_listener_fails(monkeypatch) -> None:
+    events: list[str] = []
+
+    class FakeRuntime:
+        def __init__(self, config, **kwargs):
+            events.append("runtime")
+
+        def start_listener(self):
+            events.append("start_listener")
+            raise RuntimeError("listener failed")
+
+    class FakeServer:
+        def __init__(self, address, handler, *, runtime):
+            events.append(f"server:{address[0]}:{address[1]}")
+
+        def server_close(self):
+            events.append("server_close")
+
+    monkeypatch.setattr("my_wxauto.bridge_server.BridgeRuntime", FakeRuntime)
+    monkeypatch.setattr("my_wxauto.bridge_server.BridgeHTTPServer", FakeServer)
+
+    with pytest.raises(RuntimeError, match="listener failed"):
+        create_bridge_server(BridgeServerConfig(port=0))
+
+    assert events == [
+        "runtime",
+        "server:127.0.0.1:0",
+        "start_listener",
+        "server_close",
+    ]
+
+
+def test_run_bridge_server_closes_server(monkeypatch) -> None:
+    events: list[str] = []
+
+    class FakeRuntime:
+        def __init__(self, config, **kwargs):
+            events.append("runtime")
+
+        def start_listener(self):
+            events.append("start_listener")
+
+    class FakeServer:
+        def __init__(self, address, handler, *, runtime):
+            events.append(f"server:{address[0]}:{address[1]}")
+
+        def serve_forever(self):
+            events.append("serve_forever")
+            raise KeyboardInterrupt
+
+        def server_close(self):
+            events.append("server_close")
+
+    monkeypatch.setattr("my_wxauto.bridge_server.BridgeRuntime", FakeRuntime)
+    monkeypatch.setattr("my_wxauto.bridge_server.BridgeHTTPServer", FakeServer)
+
+    with pytest.raises(KeyboardInterrupt):
+        run_bridge_server(BridgeServerConfig(port=0))
+
+    assert events == [
+        "runtime",
+        "server:127.0.0.1:0",
+        "start_listener",
+        "serve_forever",
+        "server_close",
+    ]
 
 
 def test_runtime_enqueue_and_poll_events() -> None:
