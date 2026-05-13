@@ -181,18 +181,20 @@ class HermesRunner:
         return [*shell_prefix, shell_command]
 
     def _parse_reply(self, result, session_name):
-        output = result.stdout
+        # Hermes outputs session_id on stderr in -Q mode
         session_id = None
-        lines = output.split("\n")
-        reply_lines = []
-        for line in lines:
-            if line.startswith("session_id: "):
-                session_id = line[len("session_id: "):].strip()
-            else:
-                reply_lines.append(line)
+        for source in (getattr(result, 'stderr', None) or "", result.stdout or ""):
+            for line in source.split("\n"):
+                if line.startswith("session_id: "):
+                    session_id = line[len("session_id: "):].strip()
+                    break
+            if session_id is not None:
+                break
+
         if session_id is not None and self._session_store is not None:
             self._session_store.set(session_name, session_id)
-        return "\n".join(reply_lines).strip()
+
+        return result.stdout.strip()
 
     def _bash_lc_index(self) -> int | None:
         for index in range(len(self.command) - 1):
@@ -245,6 +247,15 @@ class HermesSidecar:
             if self.config.debug:
                 print(f"[debug] empty reply for [{chat_name}], skipping send")
             return None
+
+        if self.config.debug:
+            store = getattr(self.hermes, '_session_store', None)
+            if store is not None:
+                sid = store.get(session_name_for_chat(chat_name))
+                if sid:
+                    print(f"[debug] session_id for [{chat_name}]: {sid}")
+                else:
+                    print(f"[debug] no stored session_id for [{chat_name}]")
 
         if self.config.dry_run:
             print(f"[dry-run] {chat_name}: {reply}")
