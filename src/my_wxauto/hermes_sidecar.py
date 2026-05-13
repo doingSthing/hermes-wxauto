@@ -99,6 +99,7 @@ class SidecarConfig:
     dry_run: bool = False
     once: bool = False
     retry_delay: float = 3.0
+    debug: bool = False
 
 
 class HermesRunner:
@@ -170,8 +171,16 @@ class HermesSidecar:
             return None
 
         prompt = format_prompt(event)
+        if self.config.debug:
+            print(f"[debug] === Hermes prompt for [{chat_name}] ===")
+            print(prompt)
+            print(f"[debug] === end of prompt ===")
         reply = self.hermes.ask(prompt, session_name=session_name_for_chat(chat_name)).strip()
+        if self.config.debug:
+            print(f"[debug] Hermes reply for [{chat_name}]: {reply}")
         if not reply:
+            if self.config.debug:
+                print(f"[debug] empty reply for [{chat_name}], skipping send")
             return None
 
         if self.config.dry_run:
@@ -189,6 +198,8 @@ class HermesSidecar:
                     limit=self.config.poll_limit,
                 )
                 events = payload.get("events") or []
+                if self.config.debug and events:
+                    print(f"[debug] polled {len(events)} event(s)")
                 for event in events:
                     if not isinstance(event, dict):
                         continue
@@ -254,6 +265,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--hermes-timeout", type=float, default=120.0)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--once", action="store_true")
+    parser.add_argument("--debug", action="store_true")
     return parser
 
 
@@ -271,6 +283,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         hermes_timeout=args.hermes_timeout,
         dry_run=args.dry_run,
         once=args.once,
+        debug=args.debug,
     )
     sidecar = HermesSidecar(config)
     sidecar.check_health()
