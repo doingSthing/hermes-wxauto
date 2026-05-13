@@ -501,6 +501,7 @@ def test_main_builds_sidecar_config(monkeypatch: pytest.MonkeyPatch) -> None:
         hermes_timeout=15.5,
         dry_run=True,
         once=True,
+        session_file=calls[0]["config"].session_file,
     )
     assert calls[1:] == [{"check_health": True}, {"run": True}]
 

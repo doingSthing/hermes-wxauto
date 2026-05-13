@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+import json
+import os
 import hashlib
 import json
 import shlex
@@ -100,26 +102,64 @@ class SidecarConfig:
     once: bool = False
     retry_delay: float = 3.0
     debug: bool = False
+    session_file: str = ""
 
+
+
+class SessionStore:
+    def __init__(self, path):
+        self._path, self._data = path, {}
+    def get(self, name):
+        if not self._data: self._load()
+        return self._data.get(name)
+    def set(self, name, sid):
+        if not self._data: self._load()
+        self._data[name] = sid
+        self._save()
+    def delete(self, name):
+        if not self._data: self._load()
+        self._data.pop(name, None)
+        self._save()
+    def _load(self):
+        try:
+            with open(self._path, encoding="utf-8") as fh:
+                self._data = json.load(fh)
+        except: self._data = {}
+    def _save(self):
+        os.makedirs(os.path.dirname(self._path) or ".", exist_ok=True)
+        with open(self._path, "w", encoding="utf-8") as fh:
+            json.dump(self._data, fh, indent=2, ensure_ascii=False)
 
 class HermesRunner:
-    def __init__(self, command: Sequence[str], *, timeout: float) -> None:
+    def __init__(self, command, *, timeout, session_store=None):
         self.command = tuple(command)
         self.timeout = timeout
+        self._session_store = session_store
 
-    def ask(self, prompt: str, *, session_name: str) -> str:
+    def ask(self, prompt, *, session_name):
+        sid = None
+        if self._session_store is not None:
+            sid = self._session_store.get(session_name)
+        if sid is not None:
+            try:
+                result = subprocess.run(
+                    self._build_args(prompt, session_name, continue_id=sid),
+                    text=True, encoding="utf-8", errors="replace",
+                    capture_output=True, timeout=self.timeout, check=True,
+                )
+                return self._parse_reply(result, session_name)
+            except subprocess.CalledProcessError as exc:
+                if exc.stderr and "No session found" in str(exc.stderr):
+                    if self._session_store is not None:
+                        self._session_store.delete(session_name)
         result = subprocess.run(
             self._build_args(prompt, session_name),
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            capture_output=True,
-            timeout=self.timeout,
-            check=True,
+            text=True, encoding="utf-8", errors="replace",
+            capture_output=True, timeout=self.timeout, check=True,
         )
-        return result.stdout.strip()
+        return self._parse_reply(result, session_name)
 
-    def _build_args(self, prompt: str, session_name: str) -> list[str]:
+    def _build_args(self, prompt, session_name, continue_id=None):
         hermes_args = [
             "chat",
             "-q",
@@ -128,6 +168,8 @@ class HermesRunner:
             "--source",
             "tool",
         ]
+        if continue_id is not None:
+            hermes_args.extend(("--continue", continue_id))
 
         shell_index = self._bash_lc_index()
         if shell_index is None:
@@ -137,6 +179,20 @@ class HermesRunner:
         base_command = list(self.command[shell_index + 2 :]) or ["hermes"]
         shell_command = " ".join(shlex.quote(part) for part in [*base_command, *hermes_args])
         return [*shell_prefix, shell_command]
+
+    def _parse_reply(self, result, session_name):
+        output = result.stdout
+        session_id = None
+        lines = output.split("\n")
+        reply_lines = []
+        for line in lines:
+            if line.startswith("session_id: "):
+                session_id = line[len("session_id: "):].strip()
+            else:
+                reply_lines.append(line)
+        if session_id is not None and self._session_store is not None:
+            self._session_store.set(session_name, session_id)
+        return "\n".join(reply_lines).strip()
 
     def _bash_lc_index(self) -> int | None:
         for index in range(len(self.command) - 1):
@@ -154,10 +210,17 @@ class HermesSidecar:
     ) -> None:
         self.config = config
         self.bridge = bridge if bridge is not None else BridgeClient(config.bridge_url, timeout=30.0)
-        self.hermes = hermes if hermes is not None else HermesRunner(
-            config.hermes_command,
-            timeout=config.hermes_timeout,
-        )
+        if hermes is not None:
+            self.hermes = hermes
+        else:
+            store = None
+            if config.session_file:
+                store = SessionStore(config.session_file)
+            self.hermes = HermesRunner(
+                config.hermes_command,
+                timeout=config.hermes_timeout,
+                session_store=store,
+            )
 
     def check_health(self) -> dict[str, Any]:
         payload = self.bridge.health()
@@ -266,6 +329,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--once", action="store_true")
     parser.add_argument("--debug", action="store_true")
+    parser.add_argument("--session-file", default=os.path.expanduser("~/.wxauto/hermes_sessions.json"), help="JSON file for persisting Hermes session IDs (empty to disable)")
     return parser
 
 
@@ -284,6 +348,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         dry_run=args.dry_run,
         once=args.once,
         debug=args.debug,
+        session_file=args.session_file,
     )
     sidecar = HermesSidecar(config)
     sidecar.check_health()
