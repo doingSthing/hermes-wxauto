@@ -51,6 +51,7 @@ class BridgeClient:
             f"{self.base_url}/send",
             data=body,
             headers={"Content-Type": "application/json; charset=utf-8"},
+            timeout=max(self.timeout, 60.0),
         )
 
     def _request_json(
@@ -123,8 +124,6 @@ class HermesRunner:
             "-q",
             prompt,
             "-Q",
-            "--continue",
-            session_name,
             "--source",
             "tool",
         ]
@@ -153,7 +152,7 @@ class HermesSidecar:
         hermes: HermesLike | None = None,
     ) -> None:
         self.config = config
-        self.bridge = bridge if bridge is not None else BridgeClient(config.bridge_url)
+        self.bridge = bridge if bridge is not None else BridgeClient(config.bridge_url, timeout=30.0)
         self.hermes = hermes if hermes is not None else HermesRunner(
             config.hermes_command,
             timeout=config.hermes_timeout,
@@ -195,7 +194,15 @@ class HermesSidecar:
                         continue
                     self.process_event(event)
             except (urlerror.URLError, TimeoutError, BridgeRequestError, subprocess.SubprocessError) as exc:
-                print(f"[my-wxauto hermes-sidecar] error: {exc}")
+                if isinstance(exc, subprocess.CalledProcessError):
+                    cmd = getattr(exc, "cmd", None) or []
+                    print(f"[my-wxauto hermes-sidecar] hermes exited with code {exc.returncode}")
+                    if exc.stderr:
+                        print(f"[my-wxauto hermes-sidecar] stderr: {exc.stderr.strip()}")
+                    if exc.stdout:
+                        print(f"[my-wxauto hermes-sidecar] stdout: {exc.stdout.strip()}")
+                else:
+                    print(f"[my-wxauto hermes-sidecar] error: {exc}")
                 time.sleep(self.config.retry_delay)
 
             if self.config.once:

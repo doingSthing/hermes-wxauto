@@ -189,7 +189,7 @@ def test_bridge_client_sends_message(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "你好".encode("utf-8") in req.data
     headers = {k.lower(): v for k, v in req.headers.items()}
     assert headers["content-type"] == "application/json; charset=utf-8"
-    assert timeout == 4.0
+    assert timeout == 60.0
 
 
 def test_bridge_client_rejects_non_object_json(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -245,8 +245,6 @@ def test_hermes_runner_invokes_command(monkeypatch: pytest.MonkeyPatch) -> None:
                 "-q",
                 "hello",
                 "-Q",
-                "--continue",
-                "wxauto-session",
                 "--source",
                 "tool",
             ],
@@ -300,8 +298,6 @@ def test_hermes_runner_wraps_wsl_bash_lc_command(monkeypatch: pytest.MonkeyPatch
             "-q",
             prompt,
             "-Q",
-            "--continue",
-            "wxauto-session",
             "--source",
             "tool",
         ]
