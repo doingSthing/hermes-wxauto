@@ -20,7 +20,8 @@
 建议在虚拟环境中安装：
 
 ```powershell
-cd F:\ai-work\2026-4-28\my-wxauto
+git clone https://github.com/doingSthing/hermes-wxauto.git
+cd hermes-wxauto
 python -m venv .venv
 .\.venv\Scripts\activate
 python -m pip install -U pip
