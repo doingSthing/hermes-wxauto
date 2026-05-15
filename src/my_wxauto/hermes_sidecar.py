@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import hashlib
+import re
 import shlex
 import subprocess
 import time
@@ -205,7 +206,7 @@ class HermesRunner:
         if session_id is not None and self._session_store is not None:
             self._session_store.set(session_name, session_id)
 
-        return result.stdout.strip()
+        return _clean_hermes_reply(result.stdout)
 
     def _bash_lc_index(self) -> int | None:
         for index in range(len(self.command) - 1):
@@ -350,6 +351,22 @@ def format_prompt(event: dict[str, Any]) -> str:
     lines.append("")
     lines.append("请只输出要发送到微信的回复文本。不要解释，不要包含前后缀。")
     return "\n".join(lines)
+
+
+def _clean_hermes_reply(stdout: str | None) -> str:
+    lines = []
+    for line in (stdout or "").splitlines():
+        if _is_hermes_status_line(line):
+            continue
+        lines.append(line)
+    return "\n".join(lines).strip()
+
+
+def _is_hermes_status_line(line: str) -> bool:
+    text = line.strip()
+    return bool(
+        re.match(r"^[↻⟳]?\s*Resumed session\s+\S+\s+\(\d+\s+user messages,\s+\d+\s+total messages\)$", text)
+    )
 
 
 def _event_id(event: dict[str, Any]) -> str:

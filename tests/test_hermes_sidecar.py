@@ -290,6 +290,31 @@ def test_hermes_runner_invokes_command(monkeypatch: pytest.MonkeyPatch) -> None:
     ]
 
 
+def test_hermes_runner_strips_resumed_session_banner(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_run(
+        args: list[str],
+        *,
+        text: bool,
+        encoding: str,
+        errors: str,
+        capture_output: bool,
+        timeout: float,
+        check: bool,
+    ) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(
+            args=args,
+            returncode=0,
+            stdout="↻ Resumed session 20260513_160741_09b1d2 (10 user messages, 31 total messages)\n在呢大帅！有什么吩咐？\n",
+        )
+
+    monkeypatch.setattr(hermes_sidecar.subprocess, "run", fake_run)
+
+    runner = hermes_sidecar.HermesRunner(("wsl.exe", "hermes"), timeout=12.5)
+    result = runner.ask("hello", session_name="wxauto-session")
+
+    assert result == "在呢大帅！有什么吩咐？"
+
+
 def test_hermes_runner_wraps_wsl_bash_lc_command(monkeypatch: pytest.MonkeyPatch) -> None:
     calls = []
 
